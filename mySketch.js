@@ -28,6 +28,7 @@ function setup() {
 	easer = new p5.Ease();
 	
 	mainCanvas = createCanvas(w, h);
+	mainCanvas.elt.getContext('2d', { willReadFrequently: true });
 	background(80);
 	imageMode(CENTER);
 	angleMode(DEGREES);
@@ -69,25 +70,6 @@ function setup() {
 	// bgm.play();
 	
 	bodyCount = 1;
-	body1hasArm = true;
-	body1hasLeg = true;
-	body1hasEyeball = true;
-	body1hasEyelid = true;
-	body1hasFlap = true;
-	
-	body2hasHand = true;
-	body2hasKnee = true;
-	body2hasRibs = true;
-	body2hasHeart = true;
-	body2hasFlap = true;
-	body2hasSkin = true;
-	
-	body3hasFoot = true;
-	body3hasGuts = true;
-	body3hasFlap = true;
-	body3hasBrain = true;
-	body3hasSkin = true;
-	body3hasSkull = true;
 	
 	hasScalpel = true;
 	hasBonesaw = true;
@@ -121,6 +103,7 @@ function applyResponsiveCanvasScale() {
 		mainCanvas.style("position", "absolute");
 		mainCanvas.style("left", ((windowWidth - displayW) / 2) + "px");
 		mainCanvas.style("top", ((windowHeight - displayH) / 2) + "px");
+		mainCanvas.elt.getContext('2d', { willReadFrequently: true });
 	}
 
 	document.body.style.margin = "0";
@@ -266,13 +249,19 @@ function draw() {
 	else if (r1isOpen == 1)
 		{ 
 		 	image(r1open, wc, hc);
-			untoss(grabbables[SCALPELG]);
+			const scalpelG = getToolGrabbable("tool_scalpel");
+			untoss(scalpelG);
+			if (scalpelG) {
+				scalpelG.active = true;
+				scalpelG.isConsumed = false;
+				scalpelG.visible = false;
+			}
 			r1close.reset();
 		}
 	else if (r1isOpen == -1)
 		{
 			image(r1close, wc, hc);
-			toss(grabbables[SCALPELG]);
+			toss(getToolGrabbable("tool_scalpel"));
 			r1open.reset();
 		}
 	else
@@ -280,32 +269,52 @@ function draw() {
 			image(r1, wc, hc);
 		}
 	
-	if (r2isOpen == 1)
+	if (bonesawInUse == true)
+		{
+			image(r2open, wc, hc);
+		}
+	else if (r2isOpen == 1)
 		{
 		 	image(r2open, wc, hc);
-			untoss(grabbables[BONESAWG]);
+			const bonesawG = getToolGrabbable("tool_bonesaw");
+			untoss(bonesawG);
+			if (bonesawG) {
+				bonesawG.active = true;
+				bonesawG.isConsumed = false;
+				bonesawG.visible = false;
+			}
 			r2close.reset();
 		}
 	else if (r2isOpen == -1)
 		{
 			image(r2close, wc, hc);
-			toss(grabbables[BONESAWG]);
+			toss(getToolGrabbable("tool_bonesaw"));
 			r2open.reset();
 		}
 	else
 		{
 			image(r2, wc, hc);
 		}
-	if (r3isOpen == 1)
+	if (hammerInUse == true)
+		{
+			image(r3open, wc, hc);
+		}
+	else if (r3isOpen == 1)
 		{
 		 	image(r3open, wc, hc);
-			untoss(grabbables[HAMMERG]);
+			const hammerG = getToolGrabbable("tool_hammer");
+			untoss(hammerG);
+			if (hammerG) {
+				hammerG.active = true;
+				hammerG.isConsumed = false;
+				hammerG.visible = false;
+			}
 			r3close.reset();
 		}
 	else if (r3isOpen == -1)
 		{
 			image(r3close, wc, hc);
-			toss(grabbables[HAMMERG]);
+			toss(getToolGrabbable("tool_hammer"));
 			r3open.reset();
 		}
 	else
@@ -438,17 +447,20 @@ function draw() {
 				bodyCount++;
 				if (bodyCount == 2)
 					{
-						if (grabbables[B1FLAP].hasBeenGrabbed == false){toss(grabbables[B1FLAP]);}
-						if (grabbables[B1ARM].hasBeenGrabbed == false){toss(grabbables[B1ARM]);}
-						if (grabbables[B1LEG1].hasBeenGrabbed == false && grabbables[B1LEG2].hasBeenGrabbed == false){toss(grabbables[B1LEG1]);}
-						if (grabbables[B1LEG2].hasBeenGrabbed == false && grabbables[B1LEG1].hasBeenGrabbed == false){toss(grabbables[B1LEG2]);}
-						if (grabbables[B1EYEBALL2].hasBeenGrabbed == false){toss(grabbables[B1EYEBALL2]);}
-						if (grabbables[B1EYEBALL].hasBeenGrabbed == false){toss(grabbables[B1EYEBALL]);}
+						if (typeof cleanupBodyUninteracted === "function") {
+							cleanupBodyUninteracted("body1");
+						}
+						if (typeof resetToolsToDrawer === "function") {
+							resetToolsToDrawer();
+						}
 					}
 				else if (bodyCount == 3)
 				{
-					for (let j = 9; j < 15; j++) {
-						if (grabbables[j].hasBeenGrabbed == false){toss(grabbables[j]);}
+					if (typeof cleanupBodyUninteracted === "function") {
+						cleanupBodyUninteracted("body2");
+					}
+					if (typeof resetToolsToDrawer === "function") {
+						resetToolsToDrawer();
 					}
 				}
 				framesCounted = restartBuffer;
@@ -459,6 +471,9 @@ function draw() {
 		{
 			blowup.reset();
 		}
+	if (typeof drawAllDebugOverlays === "function") {
+		drawAllDebugOverlays();
+	}
 }
 
 function timesUp(){
@@ -606,7 +621,7 @@ function entered(tool)
 			if (r1isOpen == 1)
 			{
 				drawerClose.play();
-				toss(grabbables[SCALPELG]);
+				toss(getToolGrabbable("tool_scalpel"));
 				r1isOpen = -1;
 			}
 			else {
@@ -619,7 +634,7 @@ function entered(tool)
 			if (r2isOpen == 1)
 			{
 				drawerClose.play();
-				toss(grabbables[BONESAWG]);
+				toss(getToolGrabbable("tool_bonesaw"));
 				r2isOpen = -1;
 			}
 			else {
@@ -632,7 +647,7 @@ function entered(tool)
 			if (r3isOpen == 1)
 			{
 				drawerClose.play();
-				toss(grabbables[HAMMERG]);
+				toss(getToolGrabbable("tool_hammer"));
 				r3isOpen = -1;
 			}
 			else {
@@ -689,38 +704,49 @@ function entered(tool)
 }
 
 function drawBody1(x, y) {
+	const hasArm = !hasModelItemBeenInteracted("b1_arm");
+	const hasLeg = !hasModelItemBeenInteracted("b1_leg");
+	const hasEyeball = !hasModelHitboxBeenGrabbed("b1_eye_ball");
+	const hasEyelid = !hasModelHitboxBeenGrabbed("b1_eye_lid");
+	const hasFlap = !hasModelItemBeenInteracted("b1_flap");
 	image(bed, x, y);
 	image(body1, x, y);
-	if (body1hasArm)
+	if (hasArm)
 		{
 			image(body1arm, x, y);
 		}
-	if (body1hasLeg)
+	if (hasLeg)
 		{
 			image(body1leg, x, y);
 		}
-	if (body1hasEyeball)
+	if (hasEyeball)
 		{
 			image(body1eyeball, x, y);
 		}
-	if (body1hasEyelid)
+	if (hasEyelid)
 		{
 			image(body1eyelid, x, y);
-			if (!body1hasEyeball)
+			if (!hasEyeball)
 				{
 					print("has eyelid but no eyeball?? bug");
 				}
 		}
-	if (body1hasFlap)
+	if (hasFlap)
 		{
 			image(body1flap, x, y);
 		}
 }
 
 function drawBody2(x, y) {
+	const hasKnee = !hasModelItemBeenInteracted("b2_knee");
+	const hasHand = !hasModelItemBeenInteracted("b2_hand");
+	const hasHeart = !hasModelItemBeenInteracted("b2_heart");
+	const hasRibs = !hasModelItemBeenInteracted("b2_rib");
+	const hasSkin = !hasModelItemBeenInteracted("b2_skin");
+	const hasFlap = !hasModelItemBeenInteracted("b2_flap");
   image(bed, x, y);
   image(body2, x, y);
-  if(body2hasKnee)
+  if(hasKnee)
     {
       image(body2knee, x, y);
     }
@@ -728,59 +754,65 @@ function drawBody2(x, y) {
 		{
 			image(body2blood, x, y);
 		}
-	if(body2hasHand)
+	if(hasHand)
     {
       image(body2hand, x, y);
     }
-	if(body2hasHeart)
+	if(hasHeart)
 		{
 			image(body2heart, x, y);
 		}
 		else {
 			image(body2empty, x, y);
 		}
-  if(body2hasRibs)
+  if(hasRibs)
     {
       image(body2ribs, x, y);
     }
-	if(body2hasSkin)
+	if(hasSkin)
 		{
 			image(body2, x, y);
 		}
-  if(body2hasFlap)
+  if(hasFlap)
     {
       image(body2flap, x, y);
     }
 }
 
 function drawBody3(x, y) {
+	const hasFoot = !hasModelItemBeenInteracted("b3_foot");
+	const hasSkull = !hasModelItemBeenInteracted("b3_skull");
+	const hasGuts = !hasModelItemBeenInteracted("b3_guts");
+	const hasSkin = !hasModelItemBeenInteracted("b3_skin");
+	const hasBrain = !hasModelItemBeenInteracted("b3_brain");
+	const hasFlap = !hasModelItemBeenInteracted("b3_flap");
   image(bed, x, y)
   image(body3, x, y);
-  if(body3hasFoot)
+  if(hasFoot)
     {
       image(body3foot, x, y);
     }
-	if(!body3hasSkull)
+	if(!hasSkull)
 		{
 			image(body3blood,x,y);
 		}
-  if(body3hasGuts && (!body3hasSkin))
+  if(hasGuts && (!hasSkin))
     {
       image(body3guts, x, y);
     }
-	if(!body3hasGuts)
+	if(!hasGuts)
 		{
 			image(body3empty, x, y);
 		}
-  if(body3hasBrain && (!body3hasSkull))
+  if(hasBrain && (!hasSkull))
     {
       image(body3brain, x, y);
     }
-	if(!body3hasBrain)
+	if(!hasBrain)
 		{
 			image(body3dummy, x, y)
 		}
-	if(body3hasFlap)
+	if(hasFlap)
 	{
 		image(body3flap, x, y);
 	}

@@ -1,0 +1,134 @@
+{
+  "body1": {
+    "items": [
+      {
+        "itemId": "b1_flap",
+        "hitboxes": [
+          {"idName":"B1FLAP","hitboxId":"b1_flap_main","x":810,"y":472,"radius":250,"picKey":"body1flap","active":false}
+        ]
+      },
+      {
+        "itemId": "b1_arm",
+        "hitboxes": [
+          {"idName":"B1ARM","hitboxId":"b1_arm_main","x":995,"y":513,"radius":160,"picKey":"body1arm_severed","active":false}
+        ]
+      },
+      {
+        "itemId": "b1_leg",
+        "hitboxes": [
+          {"idName":"B1LEG1","hitboxId":"b1_leg_a","x":728,"y":751,"radius":150,"picKey":"body1leg_severed","active":false},
+          {"idName":"B1LEG2","hitboxId":"b1_leg_b","x":666,"y":874,"radius":190,"picKey":"body1leg_severed","active":false}
+        ]
+      },
+      {
+        "itemId": "b1_eye",
+        "hitboxes": [
+          {"idName":"B1EYEBALL","hitboxId":"b1_eye_lid","x":700,"y":271,"radius":50,"picKey":null,"active":false,"consumeOnInteract":true,"revealHitboxIds":["b1_eye_ball"]},
+          {"idName":"B1EYEBALL2","hitboxId":"b1_eye_ball","x":700,"y":271,"radius":50,"picKey":"body1eyeball_severed","active":false,"toss":true,"revealHidden":true}
+        ]
+      }
+    ]
+  },
+  "tools": {
+    "items": [
+      {
+        "itemId": "tool_scalpel",
+        "hitboxes": [
+          {"idName":"SCALPELG","hitboxId":"tool_scalpel_main","x":1320,"y":295,"radius":180,"picKey":"scalpel","toss":true,"interactionType":"tool_toggle","interactionData":{"flagName":"scalpelInUse"}}
+        ]
+      },
+      {
+        "itemId": "tool_bonesaw",
+        "hitboxes": [
+          {"idName":"BONESAWG","hitboxId":"tool_bonesaw_main","x":1333,"y":571,"radius":240,"picKey":"bonesaw","toss":true,"interactionType":"tool_toggle","interactionData":{"flagName":"bonesawInUse"}}
+        ]
+      },
+      {
+        "itemId": "tool_hammer",
+        "hitboxes": [
+          {"idName":"HAMMERG","hitboxId":"tool_hammer_main","x":1324,"y":883,"radius":170,"picKey":"hammer","toss":true,"interactionType":"tool_toggle","interactionData":{"flagName":"hammerInUse"}}
+        ]
+      }
+    ]
+  },
+  "body2": {
+    "items": [
+      {
+        "itemId": "b2_hand",
+        "hitboxes": [
+          {"idName":"B2HAND","hitboxId":"b2_hand_main","x":944,"y":632,"radius":170,"picKey":"body2_hand_severed","active":false}
+        ]
+      },
+      {
+        "itemId": "b2_knee",
+        "hitboxes": [
+          {"idName":"B2KNEE","hitboxId":"b2_knee_main","x":653,"y":734,"radius":220,"picKey":"body2_knee_severed","active":false}
+        ]
+      },
+      {
+        "itemId": "b2_heart",
+        "hitboxes": [
+          {"idName":"B2HEART","hitboxId":"b2_heart_main","x":801,"y":429,"radius":120,"picKey":"body2_heart_severed","active":false,"toss":true,"revealHidden":true}
+        ]
+      },
+      {
+        "itemId": "b2_flap",
+        "hitboxes": [
+          {"idName":"B2FLAP","hitboxId":"b2_flap_main","x":801,"y":429,"radius":250,"picKey":"body2flap","active":false,"revealHitboxIds":["b2_skin_main"]}
+        ]
+      },
+      {
+        "itemId": "b2_skin",
+        "hitboxes": [
+          {"idName":"B2SKIN","hitboxId":"b2_skin_main","x":801,"y":429,"radius":140,"picKey":null,"active":false,"toss":true,"movable":false,"mode":"tool_zone","interactionMode":"cut_gesture","requiredTool":"tool_scalpel","consumeOnInteract":true,"revealHitboxIds":["b2_rib_main"]}
+        ]
+      },
+      {
+        "itemId": "b2_rib",
+        "hitboxes": [
+          {"idName":"B2RIB","hitboxId":"b2_rib_main","x":801,"y":429,"radius":140,"picKey":null,"active":false,"toss":true,"consumeOnInteract":true,"revealHitboxIds":["b2_heart_main"]}
+        ]
+      }
+    ]
+  },
+  "body3": {
+    "items": [
+      {
+        "itemId": "b3_guts",
+        "hitboxes": [
+          {"idName":"B3GUTS","hitboxId":"b3_guts_main","x":885,"y":485,"radius":140,"picKey":"body3_guts_severed","active":false,"toss":true,"revealHidden":true}
+        ]
+      },
+      {
+        "itemId": "b3_brain",
+        "hitboxes": [
+          {"idName":"B3BRAIN","hitboxId":"b3_brain_main","x":647,"y":242,"radius":150,"picKey":"body3_brain_severed","active":false,"toss":true,"revealHidden":true}
+        ]
+      },
+      {
+        "itemId": "b3_foot",
+        "hitboxes": [
+          {"idName":"B3FOOT","hitboxId":"b3_foot_main","x":736,"y":868,"radius":140,"picKey":"body3_foot_severed","active":false}
+        ]
+      },
+      {
+        "itemId": "b3_flap",
+        "hitboxes": [
+          {"idName":"B3FLAP","hitboxId":"b3_flap_main","x":885,"y":485,"radius":250,"picKey":"body3flap","active":false,"revealHitboxIds":["b3_skin_main"]}
+        ]
+      },
+      {
+        "itemId": "b3_skin",
+        "hitboxes": [
+          {"idName":"B3SKIN","hitboxId":"b3_skin_main","x":885,"y":485,"radius":180,"picKey":null,"active":false,"toss":true,"mode":"tool_zone","interactionMode":"cut_gesture","requiredTool":"tool_scalpel","consumeOnInteract":true,"revealHitboxIds":["b3_guts_main"]}
+        ]
+      },
+      {
+        "itemId": "b3_skull",
+        "hitboxes": [
+          {"idName":"B3SKULL","hitboxId":"b3_skull_main","x":647,"y":242,"radius":150,"picKey":null,"active":false,"consumeOnInteract":true,"revealHitboxIds":["b3_brain_main"]}
+        ]
+      }
+    ]
+  }
+}

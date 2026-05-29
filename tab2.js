@@ -27,14 +27,16 @@ let handpose;
 let video;
 let hands = [];
 let hand = [];
+let bodyGrabbablesData = null;
+let interactionModel = null;
+let globalPinchGeneration = 0;
 let options = { maxHands: 2, flipHorizontal: true };
 let grabRenderCounter = 0;
 let s = 15
-let pinch = [false,false]
 const TRACKING_OVERFLOW_SCALE_X = 1.25;
 const TRACKING_OVERFLOW_SCALE_Y = 1.2;
 const HAND_MAX = 2;
-const PINCH_CLOSE_RATIO = 0.48;
+const PINCH_CLOSE_RATIO = 0.3;
 const PINCH_OPEN_RATIO = 0.62;
 const PINCH_HOLD_FRAMES = 2;
 const HAND_SMOOTH_ALPHA = 0.58;
@@ -64,6 +66,18 @@ const PICKUP_ATTACH_DIST = 10;
 const PICKUP_RETURN_DIST = 12;
 const CLAW_PICKUP_SHRINK_SCALE = 0.82;
 const CLAW_SCALE_LERP = 0.3;
+const TOOL_RIGHT_ANGLE = -45;
+const TOOL_LEFT_ANGLE = 45;
+const TOOL_INTERACTION_RADIUS_FACTOR = 1.0;
+const TOOL_TIP_AXIS_OFFSET_DEG = -90;
+const CUT_COOLDOWN_FRAMES = 10;
+const CUT_SUSTAIN_FRAMES_SCALPEL = 5;
+const CUT_SUSTAIN_FRAMES_BONESAW = 8;
+const CUT_SUSTAIN_FRAMES_HAMMER = 8;
+const CUT_SCALPEL_MIN_SPEED = 4;
+const CUT_SCALPEL_MAX_SPEED = 10;
+const CUT_BONESAW_MIN_SPEED = 10;
+const CUT_HAMMER_MIN_SPEED = 15;
 
 function vdist(p1,p2){
 	return dist(p1.x,p1.y,p2.x,p2.y)
@@ -127,6 +141,299 @@ function inferHandSide(hand){
 		return thumb.x > index.x ? "left" : "right";
 	}
 	return "right";
+}
+
+function createInteractionModel() {
+	return {
+		itemsById: new Map(),
+		hitboxesById: new Map(),
+		bodyItemIds: new Map(),
+		bodyHitboxIds: new Map(),
+		rulesByItemId: new Map(),
+		grabbableIndexByHitboxId: new Map()
+	};
+}
+
+function resetInteractionModel() {
+	interactionModel = createInteractionModel();
+}
+
+function getOrCreateModelItem(bodyKey, itemId, def) {
+	if (!interactionModel.itemsById.has(itemId)) {
+		interactionModel.itemsById.set(itemId, {
+			id: itemId,
+			bodyKey: bodyKey,
+			state: def.initialState || "default",
+			picKey: def.picKey || null,
+			flags: { hasBeenInteracted: false },
+			hitboxIds: [],
+			ruleIds: []
+		});
+	}
+	if (!interactionModel.bodyItemIds.has(bodyKey)) {
+		interactionModel.bodyItemIds.set(bodyKey, []);
+	}
+	const bodyItemIds = interactionModel.bodyItemIds.get(bodyKey);
+	if (!bodyItemIds.includes(itemId)) {
+		bodyItemIds.push(itemId);
+	}
+	return interactionModel.itemsById.get(itemId);
+}
+
+function registerModelHitbox(bodyKey, itemDef, hitboxDef, id, g, grabbableIndex) {
+	if (!interactionModel) {
+		resetInteractionModel();
+	}
+	const itemId = itemDef.itemId || hitboxDef.itemId || hitboxDef.idName;
+	const hitboxId = hitboxDef.hitboxId || hitboxDef.idName;
+	const item = getOrCreateModelItem(bodyKey, itemId, itemDef);
+	const hitbox = {
+		id: hitboxId,
+		itemId: itemId,
+		bodyKey: bodyKey,
+		itemCode: id,
+		mode: hitboxDef.mode || "grab",
+		grabbableIndex: grabbableIndex,
+		radius: hitboxDef.radius,
+		center: { x: hitboxDef.x, y: hitboxDef.y },
+		enabled: true,
+		picKey: hitboxDef.picKey || itemDef.picKey || null,
+		isPlaceholder: (hitboxDef.picKey || itemDef.picKey || null) == null,
+		consumeOnInteract: !!hitboxDef.consumeOnInteract,
+		revealHidden: !!hitboxDef.revealHidden,
+		interactionMode: hitboxDef.interactionMode || null,
+		requiredTool: hitboxDef.requiredTool || null,
+		cutCooldownFrames: hitboxDef.cutCooldownFrames || CUT_COOLDOWN_FRAMES,
+		requireFlagsTrue: Array.isArray(hitboxDef.requireFlagsTrue) ? hitboxDef.requireFlagsTrue : [],
+		onRequirementFail: hitboxDef.onRequirementFail || null,
+		clearScalpelInUse: !!hitboxDef.clearScalpelInUse,
+		revealHitboxIds: Array.isArray(hitboxDef.revealHitboxIds) ? hitboxDef.revealHitboxIds : [],
+		hideHitboxIds: Array.isArray(hitboxDef.hideHitboxIds) ? hitboxDef.hideHitboxIds : [],
+		rules: Array.isArray(hitboxDef.rules) ? hitboxDef.rules : []
+	};
+	interactionModel.hitboxesById.set(hitboxId, hitbox);
+	interactionModel.grabbableIndexByHitboxId.set(hitboxId, grabbableIndex);
+	item.hitboxIds.push(hitboxId);
+
+	if (!interactionModel.bodyHitboxIds.has(bodyKey)) {
+		interactionModel.bodyHitboxIds.set(bodyKey, []);
+	}
+	interactionModel.bodyHitboxIds.get(bodyKey).push(hitboxId);
+
+	const ruleDefs = Array.isArray(hitboxDef.rules) ? hitboxDef.rules : [];
+	for (let i = 0; i < ruleDefs.length; i++) {
+		const ruleId = ruleDefs[i].id || `${itemId}_rule_${i}`;
+		if (!interactionModel.rulesByItemId.has(itemId)) {
+			interactionModel.rulesByItemId.set(itemId, []);
+		}
+		interactionModel.rulesByItemId.get(itemId).push({
+			id: ruleId,
+			itemId: itemId,
+			definition: ruleDefs[i]
+		});
+		item.ruleIds.push(ruleId);
+	}
+
+	// Back-reference for compatibility while we migrate logic in later steps.
+	g.modelItemId = itemId;
+	g.modelHitboxId = hitboxId;
+	g.isConsumed = false;
+}
+
+function getModelHitboxesForItem(itemId) {
+	if (!interactionModel || !interactionModel.itemsById.has(itemId)) {
+		return [];
+	}
+	const item = interactionModel.itemsById.get(itemId);
+	const out = [];
+	for (let i = 0; i < item.hitboxIds.length; i++) {
+		const hb = interactionModel.hitboxesById.get(item.hitboxIds[i]);
+		if (hb) {
+			out.push(hb);
+		}
+	}
+	return out;
+}
+
+function markModelItemInteracted(itemId) {
+	if (!interactionModel || !interactionModel.itemsById.has(itemId)) {
+		return;
+	}
+	interactionModel.itemsById.get(itemId).flags.hasBeenInteracted = true;
+}
+
+function applyHitboxDeclarativeRules(g) {
+	if (!g || !interactionModel || !g.modelHitboxId) {
+		return false;
+	}
+	const hb = interactionModel.hitboxesById.get(g.modelHitboxId);
+	if (!hb) {
+		return false;
+	}
+	for (let i = 0; i < hb.requireFlagsTrue.length; i++) {
+		const f = hb.requireFlagsTrue[i];
+		if (!globalThis[f]) {
+			if (hb.onRequirementFail === "resetOrigin") {
+				untoss(g);
+			}
+			return false;
+		}
+	}
+	if (hb.clearScalpelInUse) {
+		scalpelInUse = false;
+	}
+	for (let i = 0; i < hb.revealHitboxIds.length; i++) {
+		const revealId = hb.revealHitboxIds[i];
+		const revealHb = interactionModel.hitboxesById.get(revealId);
+		if (!revealHb) {
+			continue;
+		}
+		const revealG = grabbables[revealHb.grabbableIndex];
+		if (revealG) {
+			revealG.isConsumed = false;
+			revealG.active = true;
+			revealG.minPinchGeneration = globalPinchGeneration + 1;
+			revealG.hasBeenGrabbed = false;
+			untoss(revealG);
+			revealG.visible = !revealHb.revealHidden;
+		}
+	}
+	for (let i = 0; i < hb.hideHitboxIds.length; i++) {
+		const hideId = hb.hideHitboxIds[i];
+		const hideHb = interactionModel.hitboxesById.get(hideId);
+		if (!hideHb) {
+			continue;
+		}
+		const hideG = grabbables[hideHb.grabbableIndex];
+		if (hideG) {
+			hideG.visible = false;
+			hideG.active = false;
+			// Hidden is not consumed: tools may be reset/reopened later.
+			hideG.isConsumed = false;
+			toss(hideG);
+		}
+	}
+	if (hb.consumeOnInteract) {
+		g.isConsumed = true;
+		g.active = false;
+		toss(g);
+	}
+	return hb.consumeOnInteract ||
+		hb.clearScalpelInUse ||
+		hb.revealHitboxIds.length > 0 ||
+		hb.hideHitboxIds.length > 0;
+}
+
+function handleBody1ItemFirstGrab(g) {
+	if (!g || !g.modelItemId) {
+		return false;
+	}
+	if (g.modelItemId === "b1_flap") {
+		markModelItemInteracted("b1_flap");
+		return true;
+	}
+	if (g.modelItemId === "b1_arm") {
+		markModelItemInteracted("b1_arm");
+		return true;
+	}
+	if (g.modelItemId === "b1_leg") {
+		const itemHitboxes = getModelHitboxesForItem("b1_leg");
+		for (let i = 0; i < itemHitboxes.length; i++) {
+			const hb = itemHitboxes[i];
+			if (hb.id === g.modelHitboxId) {
+				continue;
+			}
+			const sibling = grabbables[hb.grabbableIndex];
+			if (sibling) {
+				toss(sibling);
+			}
+		}
+		markModelItemInteracted("b1_leg");
+		return true;
+	}
+	if (g.modelItemId === "b1_eye" && g.modelHitboxId === "b1_eye_lid") {
+		applyHitboxDeclarativeRules(g);
+		markModelItemInteracted("b1_eye");
+		return true;
+	}
+	if (g.modelItemId === "b1_eye" && g.modelHitboxId === "b1_eye_ball") {
+		markModelItemInteracted("b1_eye");
+		return true;
+	}
+	return false;
+}
+
+function handleBody2ItemFirstGrab(g) {
+	if (!g || !g.modelItemId || !g.modelItemId.startsWith("b2_")) {
+		return false;
+	}
+	const applied = applyHitboxDeclarativeRules(g);
+	if (!applied) {
+		const hb = interactionModel?.hitboxesById?.get(g.modelHitboxId);
+		if (hb && hb.requireFlagsTrue && hb.requireFlagsTrue.length > 0) {
+			// Requirement-gated hitboxes (e.g. skin needs scalpel) must remain retryable.
+			g.hasBeenGrabbed = false;
+			g.isGrabbed = false;
+			return true;
+		}
+	}
+	markModelItemInteracted(g.modelItemId);
+	return true;
+}
+
+function handleBody3ItemFirstGrab(g) {
+	if (!g || !g.modelItemId || !g.modelItemId.startsWith("b3_")) {
+		return false;
+	}
+	const applied = applyHitboxDeclarativeRules(g);
+	if (!applied) {
+		const hb = interactionModel?.hitboxesById?.get(g.modelHitboxId);
+		if (hb && hb.requireFlagsTrue && hb.requireFlagsTrue.length > 0) {
+			// Requirement-gated hitboxes must remain retryable.
+			g.hasBeenGrabbed = false;
+			g.isGrabbed = false;
+			return true;
+		}
+	}
+	markModelItemInteracted(g.modelItemId);
+	return true;
+}
+
+function isToolItem(itemID) {
+	return itemID === "tool_scalpel" || itemID === "tool_bonesaw" || itemID === "tool_hammer";
+}
+
+function getToolGrabbable(toolItemId) {
+	for (let i = 0; i < grabbables.length; i++) {
+		const g = grabbables[i];
+		if (g && g.modelItemId === toolItemId) return g;
+	}
+	return null;
+}
+
+function getToolAngleForSide(side) {
+	return side === "left" ? TOOL_LEFT_ANGLE : TOOL_RIGHT_ANGLE;
+}
+
+function getHeldToolTipPoint(toolObj, handSide) {
+	if (!toolObj || !toolObj.pic || !toolObj.visible) {
+		return null;
+	}
+	// Match render transform order: rotate(currentRotation) then local mirror for left tool.
+	// Compute local forward axis first, mirror locally if left, then rotate to world.
+	const rotDeg = toolObj.currentRotation;
+	const len = toolObj.s * 1.5;
+	let localX = cos(TOOL_TIP_AXIS_OFFSET_DEG);
+	const localY = sin(TOOL_TIP_AXIS_OFFSET_DEG);
+	if (handSide === "left") {
+		localX *= -1;
+	}
+	const dirX = localX * cos(rotDeg) - localY * sin(rotDeg);
+	const dirY = localX * sin(rotDeg) + localY * cos(rotDeg);
+	return createVector(
+		toolObj.pt.x + dirX * len,
+		toolObj.pt.y + dirY * len
+	);
 }
 
 class tracker{
@@ -240,6 +547,8 @@ class oneHand {
 		this.pinching = false;
 		this.pinchHold = 0;
 		this.grabbed = null;
+		this.currentPinchGeneration = 0;
+		this.mustOpenBeforeNextInteraction = false;
 		this.zigProgress = 0;
 		this.missedFrames = 0;
 		this.latestGrabbed = null;
@@ -250,6 +559,13 @@ class oneHand {
 		this.pickupTargetObj = null;
 		this.pickupStage = 0;
 		this.clawScale = 1;
+		this.grabReach = 0;
+		this.debugToolTip = null;
+		this.debugToolHits = [];
+		this.prevToolTip = null;
+		this.toolTipSpeed = 0;
+		this.cutGestureByHitboxId = new Map();
+		this.lastHeldToolItemId = null;
 		this.updateFromDetection(hand);
 	}
 	
@@ -293,7 +609,7 @@ class oneHand {
 			this.clawScale = lerp(this.clawScale, 1, CLAW_SCALE_LERP);
 			this.pinchPt = p5.Vector.lerp(this.pinchPt, this.trackedPinchPt, PICKUP_RETURN_LERP);
 			if (this.grabbed != null) {
-				this.grabbed.ud(this.getClawControlPt());
+				this.grabbed.ud(this.getClawControlPt(), this.handSide);
 			}
 			if (vdist(this.pinchPt, this.trackedPinchPt) <= scaleDistanceForWindow(PICKUP_RETURN_DIST)) {
 				this.isPickupAnimating = false;
@@ -303,9 +619,9 @@ class oneHand {
 		}
 		return true;
 	}
-	releaseGrab(resetLatestGrabbed = false, allowThrow = false) {
+	releaseGrab(resetLatestGrabbed = false, allowThrow = false, forceUnpinch = true) {
 		if (this.grabbed != null) {
-			if (allowThrow) {
+			if (allowThrow && this.grabbed.pic != null) {
 				let avgTrackedSpeed = 0;
 				let sampledSpeed = 0;
 				let avgTrackedDir = createVector(0, 0);
@@ -335,8 +651,12 @@ class oneHand {
 			this.grabbed.isGrabbed = false;
 			this.grabbed = null;
 		}
-		this.pinching = false;
-		this.pinchHold = 0;
+		if (forceUnpinch) {
+			this.pinching = false;
+			this.pinchHold = 0;
+		}
+		// One interaction per pinch: even soft-release needs open->close before next interaction.
+		this.mustOpenBeforeNextInteraction = true;
 		this.isPickupAnimating = false;
 		this.pickupTargetObj = null;
 		this.pickupStage = 0;
@@ -451,17 +771,21 @@ class oneHand {
 		const pinchDistance = vdist(this.thumbTip, this.indexTip);
 		const pinchRatio = pinchDistance / palmScale;
 		const wasPinching = this.pinching;
+		if (pinchRatio > PINCH_OPEN_RATIO) {
+			this.mustOpenBeforeNextInteraction = false;
+		}
 		s = palmScale * 0.8;
+		this.grabReach = s;
 		if (zigmode) this.checkzig()
 
-		if (!this.pinching && pinchRatio < PINCH_CLOSE_RATIO) {
+		if (!this.pinching && !this.mustOpenBeforeNextInteraction && pinchRatio < PINCH_CLOSE_RATIO) {
 			this.pinchHold++;
 			if (this.pinchHold >= PINCH_HOLD_FRAMES) {
 				this.pinching = true;
 				this.pinchHold = PINCH_HOLD_FRAMES;
 			}
 		} else if (this.pinching && pinchRatio > PINCH_OPEN_RATIO) {
-			this.releaseGrab(false, true);
+			this.releaseGrab(false, true, true);
 		} else {
 			this.pinchHold = max(0, this.pinchHold - 1);
 		}
@@ -472,6 +796,10 @@ class oneHand {
 			this.clawScale = lerp(this.clawScale, 1, CLAW_SCALE_LERP);
 		}
 		const justPinched = (!wasPinching && this.pinching);
+		if (justPinched) {
+			globalPinchGeneration++;
+			this.currentPinchGeneration = globalPinchGeneration;
+		}
 
 		if (this.reconnectGrabCooldown <= 0 && justPinched && this.grabbed == null && !this.isPickupAnimating){
             let currClosestD = w;
@@ -481,8 +809,15 @@ class oneHand {
 				if (!g.active) {
 					continue;
 				}
+				const hb = (interactionModel && g.modelHitboxId) ? interactionModel.hitboxesById.get(g.modelHitboxId) : null;
+				if (hb && hb.mode && hb.mode !== "grab") {
+					continue;
+				}
+				if (g.minPinchGeneration > this.currentPinchGeneration) {
+					continue;
+				}
                 let d = vdist(this.pinchPt,g.pt)
-                if (d<((s+g.s) * GRAB_RANGE_SCALE / getWindowScaleFactor()) && d<=currClosestD){
+                if (d<((this.grabReach+g.s) * GRAB_RANGE_SCALE / getWindowScaleFactor()) && d<=currClosestD){
                     currClosestD = d
                     currClosest = g
                 }
@@ -495,11 +830,159 @@ class oneHand {
 		if (this.updatePickupAnimation()) {
 			return;
 		}
+		this.updateToolGestureInteractions();
+
+		if (this.grabbed != null && !this.grabbed.active) {
+			// Consumed placeholders should release immediately.
+			this.releaseGrab(false, false, false);
+			return;
+		}
 
 		if (this.pinching && this.grabbed != null){
-			this.grabbed.ud(this.getClawControlPt());
+			this.grabbed.ud(this.getClawControlPt(), this.handSide);
 		}
+		this.updateDebugToolInteraction();
 }
+	updateDebugToolInteraction() {
+		this.debugToolTip = null;
+		this.debugToolHits = [];
+		if (!this.grabbed || !isToolItem(this.grabbed.itemID)) {
+			return;
+		}
+		const tip = getHeldToolTipPoint(this.grabbed, this.handSide);
+		this.debugToolTip = tip;
+		if (!tip) {
+			return;
+		}
+		for (let i = 0; i < grabbables.length; i++) {
+			const g = grabbables[i];
+			if (!g || g === this.grabbed || !g.active) {
+				continue;
+			}
+			const interactionRadius = g.s * TOOL_INTERACTION_RADIUS_FACTOR;
+			if (vdist(tip, g.pt) <= interactionRadius) {
+				this.debugToolHits.push(g);
+			}
+		}
+	}
+	updateToolGestureInteractions() {
+		const heldTool = this.grabbed;
+		if (!heldTool || !isToolItem(heldTool.itemID) || !this.pinching) {
+			this.lastHeldToolItemId = null;
+			this.prevToolTip = null;
+			this.toolTipSpeed = 0;
+			return;
+		}
+		const tip = getHeldToolTipPoint(heldTool, this.handSide);
+		if (!tip) {
+			this.prevToolTip = null;
+			this.toolTipSpeed = 0;
+			return;
+		}
+		this.toolTipSpeed = this.prevToolTip ? p5.Vector.dist(tip, this.prevToolTip) : 0;
+		this.prevToolTip = tip.copy();
+		const toolItemId = heldTool.modelItemId || null;
+		const justPickedUpTool = this.lastHeldToolItemId !== toolItemId;
+		this.lastHeldToolItemId = toolItemId;
+		if (justPickedUpTool && typeof DEBUG_MODE !== "undefined" && DEBUG_MODE) {
+			print("[TOOL_PICKED_UP]", {
+				toolItemId: toolItemId,
+				pinching: this.pinching
+			});
+		}
+		for (const [hbId, hb] of interactionModel.hitboxesById.entries()) {
+			const zoneG = grabbables[hb.grabbableIndex];
+			if (!zoneG || !zoneG.active || zoneG.isConsumed) {
+				continue;
+			}
+			let state = this.cutGestureByHitboxId.get(hbId);
+			if (!state) {
+				state = { armed: false, peak: 0, cooldown: 0, debugArmed: false, debugPeak: 0, highSpeedFrames: 0, debugHighSpeedFrames: 0 };
+				this.cutGestureByHitboxId.set(hbId, state);
+			}
+			if (state.cooldown > 0) {
+				state.cooldown--;
+				continue;
+			}
+			const inZone = vdist(tip, zoneG.pt) <= (zoneG.s * TOOL_INTERACTION_RADIUS_FACTOR);
+			if (!inZone) {
+				state.armed = false;
+				state.peak = 0;
+				state.highSpeedFrames = 0;
+				state.debugArmed = false;
+				state.debugPeak = 0;
+				state.debugHighSpeedFrames = 0;
+				continue;
+			}
+			if (justPickedUpTool && typeof DEBUG_MODE !== "undefined" && DEBUG_MODE) {
+				print("[TOOL_PICKUP_CONTACT]", {
+					toolItemId: toolItemId,
+					targetHitboxId: hbId,
+					targetItemId: zoneG.modelItemId,
+					interactionMode: hb.interactionMode || "grab",
+					tipSpeed: this.toolTipSpeed
+				});
+			}
+			let requiredSustainFrames = CUT_SUSTAIN_FRAMES_SCALPEL;
+			if (toolItemId === "tool_bonesaw") {
+				requiredSustainFrames = CUT_SUSTAIN_FRAMES_BONESAW;
+			} else if (toolItemId === "tool_hammer") {
+				requiredSustainFrames = CUT_SUSTAIN_FRAMES_HAMMER;
+			}
+			const scalpelMin = scaleSpeedForWindow(CUT_SCALPEL_MIN_SPEED);
+			const scalpelMax = scaleSpeedForWindow(CUT_SCALPEL_MAX_SPEED);
+			const bonesawMin = scaleSpeedForWindow(CUT_BONESAW_MIN_SPEED);
+			const hammerMin = scaleSpeedForWindow(CUT_HAMMER_MIN_SPEED);
+			let speedMatch = false;
+			if (toolItemId === "tool_scalpel") {
+				speedMatch = this.toolTipSpeed >= scalpelMin && this.toolTipSpeed <= scalpelMax;
+			} else if (toolItemId === "tool_bonesaw") {
+				speedMatch = this.toolTipSpeed > bonesawMin;
+			} else if (toolItemId === "tool_hammer") {
+				speedMatch = this.toolTipSpeed > hammerMin;
+			}
+			if (speedMatch) {
+				state.debugHighSpeedFrames++;
+			} else {
+				state.debugHighSpeedFrames = 0;
+			}
+			if (state.debugHighSpeedFrames >= requiredSustainFrames) {
+				if (typeof DEBUG_MODE !== "undefined" && DEBUG_MODE) {
+					print("[TOOL_ACTION_TRIGGER_TEST]", {
+						toolItemId: toolItemId,
+						targetHitboxId: hbId,
+						targetItemId: zoneG.modelItemId,
+						interactionMode: hb.interactionMode || "grab",
+						tipSpeed: this.toolTipSpeed
+					});
+				}
+				state.debugHighSpeedFrames = 0;
+			}
+			if (hb.interactionMode !== "cut_gesture") {
+				continue;
+			}
+			if (speedMatch) {
+				state.highSpeedFrames++;
+			} else {
+				state.highSpeedFrames = 0;
+			}
+			if (state.highSpeedFrames >= requiredSustainFrames) {
+				if (typeof DEBUG_MODE !== "undefined" && DEBUG_MODE) {
+					print("[TOOL_ACTION_TRIGGER]", {
+						toolItemId: toolItemId,
+						targetHitboxId: hbId,
+						targetItemId: zoneG.modelItemId,
+						tipSpeed: this.toolTipSpeed
+					});
+				}
+				applyHitboxDeclarativeRules(zoneG);
+				zoneG.hasBeenGrabbed = true;
+				markModelItemInteracted(zoneG.modelItemId);
+				state.highSpeedFrames = 0;
+				state.cooldown = hb.cutCooldownFrames || CUT_COOLDOWN_FRAMES;
+			}
+		}
+	}
 	checkzig() {
 		if (zigProgress == zig.length){
 			print("ZIGGED");
@@ -543,6 +1026,7 @@ class grabbable {
 		this.origY = y;
 		this.movable = true;
 		this.active = true;
+		this.grabbedByHandSide = "right";
 		this.baseScale = 1;
 		this.currentScale = 1;
 		this.grabScale = 1.1;
@@ -554,6 +1038,7 @@ class grabbable {
 		this.bounceSpinPerFrame = 0;
 		this.pendingDropSpin = 0;
 		this.pickupOrder = -1;
+		this.minPinchGeneration = 0;
 		this.isThrown = false;
 		this.throwVelocity = createVector(0, 0); // Linear trajectory only (position).
 		this.throwAngularVelocity = 0;
@@ -662,15 +1147,26 @@ class grabbable {
 						}
         }
 	}
-ud(pt) {
+ud(pt, handSide) {
 		if (!this.active) {
 			return;
 		}
 		if (!this.isGrabbed) {
-			this.grabRotation = this.currentRotation + random(-10, 10);
+			if (isToolItem(this.itemID)) {
+				// Tools settle to handed hold orientation.
+				this.grabRotation = getToolAngleForSide(handSide);
+			} else {
+				this.grabRotation = this.currentRotation + random(-10, 10);
+			}
 			this.pickupOrder = ++grabRenderCounter;
 		}
+		if (isToolItem(this.itemID)) {
+			this.grabRotation = getToolAngleForSide(handSide);
+		}
 		this.isGrabbed = true;
+		if (handSide) {
+			this.grabbedByHandSide = handSide;
+		}
 		this.isThrown = false;
 		this.throwVelocity.set(0, 0);
 		this.throwAngularVelocity = 0;
@@ -697,113 +1193,29 @@ ud(pt) {
 				else {
 					pickupL.play();
 				}
-				print("update")
+				// print("update")
 				this.hasBeenGrabbed = true;
-				switch (this.itemID){
-					case B1FLAP:
-						body1hasFlap = false;
-						break;
-					case B1ARM:
-						body1hasArm = false;
-						break;
-					case B1LEG1:
-						body1hasLeg = false;
-						toss(grabbables[B1LEG2]);
-						break;
-					case B1LEG2:
-						body1hasLeg = false;
-						toss(grabbables[B1LEG1]);
-						break;
-					case B1EYEBALL:
-						body1hasEyelid = false;
-						untoss(grabbables[B1EYEBALL2])
-						grabbables[B1EYEBALL2].visible = true;
-						//toss(grabbables[B1EYEBALL2]);
-						break;
-					case B1EYEBALL2:
-						body1hasEyeball = false;
-						break;
-					//blob :3 — Today at 11:55 AM
-					//TOOLS BREAK
-					case B2HAND:
-							body2hasHand = false;
-							break;
-					case B2KNEE:
-							body2hasKnee = false;
-							break;
-					case B2HEART:
-							body2hasHeart = false;
-							break;
-					case B2FLAP:
-							body2hasFlap = false;
-							untoss(grabbables[B2SKIN])
-							break;
-					case B2SKIN:
-							if(!scalpelInUse)
-							{
-								untoss(this);
-							}
-						else {
-								this.movable = true;
-								toss(this);
-								body2hasSkin = false;
-								scalpelInUse = false;
-								grabbables[SCALPELG].visible = false;
-								untoss(grabbables[SCALPELG])
-								untoss(grabbables[B2RIB])
-							}
-							break;
-					case B2RIB:
-							body2hasRibs = false;
-							untoss(grabbables[B2HEART])
-							break;
-					case B3GUTS:
-							body3hasGuts = false;
-							break;
-					case B3BRAIN:
-							body3hasBrain = false;
-							break;
-					case B3FOOT:
-							body3hasFoot = false;
-							break;
-					case B3FLAP:
-							body3hasFlap = false;
-							untoss(grabbables[B3SKIN])
-							break;
-					case B3SKIN:
-							if(!scalpelInUse)
-							{
-								untoss(this);
-							}
-						else {
-								this.movable = true;
-								body3hasSkin = false;
-								scalpelInUse = false;
-								toss(this);
-								grabbables[SCALPELG].visible = false;
-								untoss(grabbables[SCALPELG])
-								untoss(grabbables[B3GUTS])
-							}
-							break;
-					case B3SKULL:
-							body3hasSkull = false;
-							untoss(grabbables[B3BRAIN])
-							break;
-						
-					case SCALPELG:
+				if (handleBody1ItemFirstGrab(this)) {
+					return;
+				}
+				if (handleBody2ItemFirstGrab(this)) {
+					return;
+				}
+				if (handleBody3ItemFirstGrab(this)) {
+					return;
+				}
+				switch (this.modelItemId){
+					case "tool_scalpel":
 					scalpelInUse = true;
-					//toss(grabbables[SCALPELG]);
 						this.hasBeenGrabbed=false;
 						break;
-					case BONESAWG:
+					case "tool_bonesaw":
 					bonesawInUse = true;
-					//toss(grabbables[BONESAWG]);
 						this.hasBeenGrabbed=false;
 						break;
 						
-					case HAMMERG:
-					bonesawInUse = true;
-					//toss(grabbables[HAMMERG]);
+					case "tool_hammer":
+					hammerInUse = true;
 						this.hasBeenGrabbed=false;
 						break;
 				}
@@ -856,6 +1268,9 @@ ud(pt) {
 				push();
 				rotate(this.currentRotation);
 				scale(this.currentScale);
+				if (isToolItem(this.itemID) && this.grabbedByHandSide === "left") {
+					scale(-1, 1);
+				}
 				image(this.pic, 0, 0);
 				pop();
 				pop();
@@ -884,6 +1299,7 @@ function preloadWeg() {
 	zig = [createVector(0,0),createVector(200,0),createVector(400,0),createVector(500,0),createVector(400,100),createVector(200,400),createVector(0,500),createVector(500,500)];
 	zstart = createVector(w/5,h/5);
   handpose = ml5.handpose(options);
+	bodyGrabbablesData = loadJSON("data/body-grabbables.json");
 }
 
 //SETUP
@@ -905,8 +1321,10 @@ function setupWeg() {
 	// 	grabbables.push(new grabbable(width/2, i*height/10,30+(5*i)))
 	// }
 	handTracker = (new tracker());
+	resetInteractionModel();
 	
 	setupBody1();
+	setupTools();
 	
 }
 
@@ -925,7 +1343,6 @@ function drawWeg() {
 	pop();
 
 	handTracker.ud();
-	// updateObj();
 	for (let i=0; i<grabbables.length; i++){
 		grabbables[i].drop();
 	}
@@ -944,6 +1361,76 @@ function drawWeg() {
 			line(zig[i].x+zstart.x,zig[i].y+zstart.y,zig[i+1].x+zstart.x,zig[i+1].y+zstart.y);
 		}
 	}
+}
+
+function drawDebugInteractableHitboxes() {
+	if (typeof DEBUG_MODE === "undefined" || !DEBUG_MODE) {
+		return;
+	}
+	const isOnScreen = (pt) => pt && pt.x >= 0 && pt.x <= w && pt.y >= 0 && pt.y <= h;
+	const toolHotSet = new Set();
+	for (let hIdx = 0; hIdx < handTracker.hands.length; hIdx++) {
+		const handObj = handTracker.hands[hIdx];
+		if (!handObj || !handObj.grabbed || !isToolItem(handObj.grabbed.itemID) || !handObj.debugToolTip) {
+			continue;
+		}
+		for (let i = 0; i < grabbables.length; i++) {
+			const g = grabbables[i];
+			if (!g || !isOnScreen(g.pt)) {
+				continue;
+			}
+			const interactionRadius = g.s * TOOL_INTERACTION_RADIUS_FACTOR;
+			if (vdist(handObj.debugToolTip, g.pt) <= interactionRadius) {
+				toolHotSet.add(i);
+			}
+		}
+	}
+
+	push();
+	noFill();
+	strokeWeight(2);
+
+	// Grabbable hitboxes (all visible interactables on screen).
+	for (let i = 0; i < grabbables.length; i++) {
+		const g = grabbables[i];
+		if (!g || !isOnScreen(g.pt)) {
+			continue;
+		}
+		const toolInside = toolHotSet.has(i);
+		const baseColor = g.hasBeenGrabbed ? color(0, 120, 255, 210) : color(255, 60, 60, 210);
+		stroke(toolInside ? color(0, 255, 120, 230) : baseColor);
+		circle(g.pt.x, g.pt.y, g.s * 2);
+		stroke(toolInside ? color(255, 255, 0, 230) : color(255, 255, 255, 90));
+		circle(g.pt.x, g.pt.y, g.s * TOOL_INTERACTION_RADIUS_FACTOR * 2);
+	}
+
+	// Drop-zone interactables.
+	stroke(255, 220, 0, 190);
+	rectMode(CORNERS);
+	rect(0, 200, 400, 500);
+	rect(0, 600, 400, 900);
+
+	// Per-hand grab interaction radii (matches grab logic).
+	for (let hIdx = 0; hIdx < handTracker.hands.length; hIdx++) {
+		const handObj = handTracker.hands[hIdx];
+		const p = handObj.pinchPt;
+		const baseR = (handObj.grabReach * GRAB_RANGE_SCALE / getWindowScaleFactor());
+		let anyInRange = false;
+		for (let i = 0; i < grabbables.length; i++) {
+			const g = grabbables[i];
+			if (!g || !isOnScreen(g.pt) || !g.active) {
+				continue;
+			}
+			const edgeToEdgeReach = baseR + (g.s * GRAB_RANGE_SCALE / getWindowScaleFactor());
+			if (vdist(p, g.pt) <= edgeToEdgeReach) {
+				anyInRange = true;
+				break;
+			}
+		}
+		stroke(anyInRange ? color(0, 255, 120, 220) : color(255, 255, 255, 120));
+		circle(p.x, p.y, baseR * 2);
+	}
+	pop();
 }
 
 function renderGrabbablesUnderClaws() {
@@ -996,25 +1483,73 @@ function drawHands(){
 			image(clawImg, 0, 0);
 			pop();
 		}
+
 	}
 	
 }
 
+function drawHandDebugOverlay() {
+	if (typeof DEBUG_MODE === "undefined" || !DEBUG_MODE) {
+		return;
+	}
+	for (let i = 0; i < handTracker.hands.length; i++) {
+		const h = handTracker.hands[i];
+		const p = h.pinchPt;
+		push();
+		noFill();
+		stroke(255, 0, 255, 230);
+		strokeWeight(2);
+		circle(p.x, p.y, 14);
+		pop();
 
-
-function updateObj(){
-	for (let i = 0; i < hands.length; i++) {
-		if (pinch[i] && vdist(pinchPt[i],obj)<s){
-			// print("pinch on obj")
-			pinched[i] = true
-			
+		if (h.grabbed && isToolItem(h.grabbed.itemID)) {
+			const explicitTip = getHeldToolTipPoint(h.grabbed, h.handSide);
+			if (explicitTip) {
+				push();
+				stroke(255, 180, 0);
+				strokeWeight(2);
+				line(p.x, p.y, explicitTip.x, explicitTip.y);
+				noFill();
+				circle(p.x, p.y, 14);
+				circle(explicitTip.x, explicitTip.y, 14);
+				pop();
+			}
 		}
-		if (pinched[i]){
-			obj.x = pinchPt[i].x
-			obj.y = pinchPt[i].y
+
+		if (h.debugToolTip) {
+			const heldTool = h.grabbed;
+			const toolLen = heldTool ? heldTool.s : 0;
+			push();
+			stroke(255, 180, 0);
+			strokeWeight(2);
+			line(p.x, p.y, h.debugToolTip.x, h.debugToolTip.y);
+			noFill();
+			circle(p.x, p.y, 14);
+			circle(h.debugToolTip.x, h.debugToolTip.y, 14);
+			circle(p.x, p.y, toolLen * 2);
+			pop();
+
+			for (let j = 0; j < h.debugToolHits.length; j++) {
+				const g = h.debugToolHits[j];
+				push();
+				noFill();
+				stroke(0, 255, 0);
+				strokeWeight(3);
+				circle(g.pt.x, g.pt.y, g.s * TOOL_INTERACTION_RADIUS_FACTOR * 2);
+				pop();
+			}
 		}
 	}
 }
+
+function drawAllDebugOverlays() {
+	if (typeof DEBUG_MODE === "undefined" || !DEBUG_MODE) {
+		return;
+	}
+	drawDebugInteractableHitboxes();
+	drawHandDebugOverlay();
+}
+
 
 
 // Callback function for when handpose outputs data
@@ -1029,104 +1564,73 @@ function gotHands(results) {
 	handTracker.endFrame();
 }
 
-function setupBody1()
-{
-	B1flap = new grabbable(810, 472, B1flapRadius, false, B1FLAP, body1flap);
-	grabbables.push(B1flap);
-	B1flap.active = false;
-	B1arm = new grabbable(995, 513, B1armRadius, false, B1ARM, body1arm_severed);
-	grabbables.push(B1arm);
-	B1arm.active = false;
-	B1leg1 = new grabbable(728, 751, B1leg1Radius, false, B1LEG1, body1leg_severed);
-	grabbables.push(B1leg1);
-	B1leg1.active = false;
-	B1leg2 = new grabbable(666, 874, B1leg2Radius, false, B1LEG2, body1leg_severed);
-	grabbables.push(B1leg2);
-	B1leg2.active = false;
-	B1eyeball = new grabbable(700, 271, B1eyeballRadius, false, B1EYEBALL, null);
-	grabbables.push(B1eyeball);
-	B1eyeball.active = false;
-	B1eyeball2 = new grabbable(700, 271, B1eyeball2Radius, false, B1EYEBALL2, body1eyeball_severed);
-	grabbables.push(B1eyeball2);
-	B1eyeball2.active = false;
-	toss(B1eyeball2);
-	scalpelG = new grabbable(scalpelX, scalpelY, scalpelRadius, false, SCALPELG, scalpel);
-	grabbables.push(scalpelG);
-	toss(scalpelG);
-	bonesawG = new grabbable(bonesawX, bonesawY, bonesawRadius, false, BONESAWG, bonesaw);
-	grabbables.push(bonesawG);
-	toss(bonesawG);
-	hammerG = new grabbable(hammerX, hammerY, hammerRadius, false, HAMMERG, hammer);
-	grabbables.push(hammerG);
-	toss(hammerG);
+function getPicByKeyMap() {
+	return {
+		body1flap, body1arm_severed, body1leg_severed, body1eyeball_severed,
+		scalpel, bonesaw, hammer,
+		body2_hand_severed, body2_knee_severed, body2_heart_severed, body2flap,
+		body3_guts_severed, body3_brain_severed, body3_foot_severed, body3flap
+	};
 }
 
-function setupBody2()
-{
-	B2hand = new grabbable(944, 632, B2handRadius, false, B2HAND, body2_hand_severed);
-    grabbables.push(B2hand);
-	B2hand.active = false;
-	B2knee = new grabbable(653, 734, B2kneeRadius, false, B2KNEE, body2_knee_severed);
-			grabbables.push(B2knee);
-	B2knee.active = false;
-	B2heart = new grabbable(801, 429, B2heartRadius, false, B2HEART, body2_heart_severed);
-			grabbables.push(B2heart);
-	B2heart.active = false;
-	toss(B2heart);
-	B2flap = new grabbable(801, 429, B2flapRadius, false, B2FLAP, body2flap);
-			grabbables.push(B2flap);
-	B2flap.active = false;
-	B2skin = new grabbable(801, 429, B2skinRadius, false, B2SKIN, null);
-			grabbables.push(B2skin);
-	B2skin.active = false;
-	toss(B2skin);
-	B2skin.movable = false;
-	B2rib = new grabbable(801, 429, B2ribRadius, false, B2RIB, null);
-			grabbables.push(B2rib);
-	B2rib.active = false;
-	toss(B2rib);
-	//B2rib.movable = false;
+function setupGrabbablesFromBodyDefs(bodyKey) {
+	if (!bodyGrabbablesData || !bodyGrabbablesData[bodyKey]) {
+		return;
+	}
+	const picByKey = getPicByKeyMap();
+	const section = bodyGrabbablesData[bodyKey];
+	const items = Array.isArray(section?.items) ? section.items : [];
+	for (let i = 0; i < items.length; i++) {
+		const itemDef = items[i];
+		const hitboxes = Array.isArray(itemDef.hitboxes) ? itemDef.hitboxes : [];
+		for (let j = 0; j < hitboxes.length; j++) {
+			const hb = hitboxes[j];
+			const id = itemDef.itemId || hb.itemId || hb.hitboxId || hb.idName;
+			const isTool = isToolItem(id);
+			const picKey = hb.picKey || itemDef.picKey;
+			const pic = picKey ? picByKey[picKey] : null;
+			const g = new grabbable(hb.x, hb.y, hb.radius, false, id, pic);
+			const active = (typeof hb.active === "boolean") ? hb.active : (typeof itemDef.active === "boolean" ? itemDef.active : true);
+			g.active = active;
+			if (hb.movable === false || itemDef.movable === false) {
+				g.movable = false;
+			}
+			if (isTool) {
+				g.currentRotation = TOOL_RIGHT_ANGLE;
+				g.grabRotation = TOOL_RIGHT_ANGLE;
+			}
+			grabbables.push(g);
+			const grabbableIndex = grabbables.length - 1;
+			registerModelHitbox(bodyKey, itemDef, hb, id, g, grabbableIndex);
+			if (hb.toss || itemDef.toss) {
+				toss(g);
+			}
+		}
+	}
 }
 
-function setupBody3()
-{
-	B3guts = new grabbable(885, 485, B3gutsRadius, false, B3GUTS, body3_guts_severed);
-    grabbables.push(B3guts);
-	B3guts.active = false;
-	toss(B3guts);
-	B3brain = new grabbable(647, 242, B3brainRadius, false, B3BRAIN, body3_brain_severed);
-			grabbables.push(B3brain);
-	B3brain.active = false;
-	toss(B3brain);
-	B3foot = new grabbable(736, 868, B3footRadius, false, B3FOOT, body3_foot_severed);
-			grabbables.push(B3foot);
-	B3foot.active = false;
-	B3flap = new grabbable(885, 485, B3flapRadius, false, B3FLAP, body3flap);
-			grabbables.push(B3flap);
-	B3flap.active = false;
-	B3skin = new grabbable(885, 485, B3skinRadius, false, B3SKIN, null);
-			grabbables.push(B3skin);
-	B3skin.active = false;
-	toss(B3skin);
-	//B3skin.movable = false;
-	B3skull = new grabbable(647, 242, B3skullRadius, false, B3SKULL, null);
-			grabbables.push(B3skull);
-	B3skull.active = false;
-	//B3skull.movable = false;
-}
+function setupBody1() { setupGrabbablesFromBodyDefs("body1"); }
+function setupTools() { setupGrabbablesFromBodyDefs("tools"); }
+function setupBody2() { setupGrabbablesFromBodyDefs("body2"); }
+function setupBody3() { setupGrabbablesFromBodyDefs("body3"); }
 
 function setBodyGrabbablesActive(bodyNum, isActive) {
-	let ids = [];
-	if (bodyNum === 1) {
-		ids = [B1FLAP, B1ARM, B1LEG1, B1LEG2, B1EYEBALL, B1EYEBALL2];
-	} else if (bodyNum === 2) {
-		ids = [B2HAND, B2KNEE, B2HEART, B2FLAP, B2SKIN, B2RIB];
-	} else if (bodyNum === 3) {
-		ids = [B3GUTS, B3BRAIN, B3FOOT, B3FLAP, B3SKIN, B3SKULL];
+	const bodyKey = bodyNum === 1 ? "body1" : (bodyNum === 2 ? "body2" : (bodyNum === 3 ? "body3" : null));
+	if (!bodyKey || !interactionModel || !interactionModel.bodyHitboxIds.has(bodyKey)) {
+		return;
 	}
-	for (let i = 0; i < ids.length; i++) {
-		const g = grabbables[ids[i]];
+	const hitboxIds = interactionModel.bodyHitboxIds.get(bodyKey);
+	for (let i = 0; i < hitboxIds.length; i++) {
+		const hb = interactionModel.hitboxesById.get(hitboxIds[i]);
+		if (!hb) {
+			continue;
+		}
+		const g = grabbables[hb.grabbableIndex];
 		if (g) {
+			if (g.isConsumed) {
+				g.active = false;
+				continue;
+			}
 			if (!isActive && g.hasBeenGrabbed) {
 				g.active = true;
 			} else {
@@ -1136,56 +1640,79 @@ function setBodyGrabbablesActive(bodyNum, isActive) {
 	}
 }
 
+function cleanupBodyUninteracted(bodyKey) {
+	if (!interactionModel || !interactionModel.bodyItemIds.has(bodyKey)) {
+		return;
+	}
+	const itemIds = interactionModel.bodyItemIds.get(bodyKey);
+	for (let i = 0; i < itemIds.length; i++) {
+		const itemId = itemIds[i];
+		const hitboxes = getModelHitboxesForItem(itemId);
+		let anyGrabbed = false;
+		for (let j = 0; j < hitboxes.length; j++) {
+			const g = grabbables[hitboxes[j].grabbableIndex];
+			if (g && g.hasBeenGrabbed) {
+				anyGrabbed = true;
+				break;
+			}
+		}
+		if (anyGrabbed) {
+			continue;
+		}
+		for (let j = 0; j < hitboxes.length; j++) {
+			const g = grabbables[hitboxes[j].grabbableIndex];
+			if (g) {
+				toss(g);
+			}
+		}
+	}
+}
 
-// grabbable constants
-const B1FLAP = 0;
-B1flapRadius = 250;
-const B1ARM = 1;
-B1armRadius = 160;
-const B1LEG1 = 2;
-B1leg1Radius = 150;
-const B1LEG2 = 3;
-B1leg2Radius = 190;
-const B1EYEBALL = 4;
-B1eyeballRadius = 50;
-const B1EYEBALL2 = 5;
-B1eyeball2Radius = 50;
-const SCALPELG = 6;
-scalpelRadius = 180;
-scalpelX = 1320;
-scalpelY = 295;
-const BONESAWG = 7;
-bonesawX = 1333;
-bonesawY = 571;
-bonesawRadius = 240;
-const HAMMERG = 8;
-hammerX = 1324;
-hammerY = 883;
-hammerRadius = 170;
-const B2HAND = 9;
-B2handRadius = 170;
-const B2KNEE = 10;
-B2kneeRadius = 220;
-const B2HEART = 11;
-B2heartRadius = 120;
-const B2FLAP = 12;
-B2flapRadius = 250;
-const B2SKIN = 13;
-B2skinRadius = 140;
-const B2RIB = 14;
-B2ribRadius = 140;
-const B3GUTS = 15;
-B3gutsRadius = 140;
-const B3BRAIN = 16;
-B3brainRadius = 150;
-const B3FOOT = 17;
-B3footRadius = 140;
-const B3FLAP = 18;
-B3flapRadius = 250;
-const B3SKIN = 19;
-B3skinRadius = 180;
-const B3SKULL = 20;
-B3skullRadius = 150;
+function resetToolsToDrawer() {
+	const toolItemIds = ["tool_scalpel", "tool_bonesaw", "tool_hammer"];
+	for (let i = 0; i < toolItemIds.length; i++) {
+		const g = getToolGrabbable(toolItemIds[i]);
+		if (!g) {
+			continue;
+		}
+		g.isGrabbed = false;
+		g.active = false;
+		g.visible = false;
+		g.isConsumed = false;
+		toss(g);
+	}
+	scalpelInUse = false;
+	bonesawInUse = false;
+	hammerInUse = false;
+	if (handTracker && Array.isArray(handTracker.hands)) {
+		for (let i = 0; i < handTracker.hands.length; i++) {
+			const h = handTracker.hands[i];
+			if (h && h.grabbed && isToolItem(h.grabbed.itemID)) {
+				h.releaseGrab(false, false, false);
+			}
+		}
+	}
+}
+
+function hasModelHitboxBeenGrabbed(hitboxId) {
+	if (!interactionModel || !interactionModel.hitboxesById.has(hitboxId)) {
+		return false;
+	}
+	const hb = interactionModel.hitboxesById.get(hitboxId);
+	const g = grabbables[hb.grabbableIndex];
+	return !!(g && g.hasBeenGrabbed);
+}
+
+function hasModelItemBeenInteracted(itemId) {
+	const hitboxes = getModelHitboxesForItem(itemId);
+	for (let i = 0; i < hitboxes.length; i++) {
+		const g = grabbables[hitboxes[i].grabbableIndex];
+		if (g && g.hasBeenGrabbed) {
+			return true;
+		}
+	}
+	return false;
+}
 
 
 const GONE = 9000;
