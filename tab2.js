@@ -1037,12 +1037,17 @@ function updateDragPanelInteraction() {
 
 	const sameDirection = (dyL > 0 && dyR > 0) || (dyL < 0 && dyR < 0);
 	const minSpeed = min(abs(dyL), abs(dyR));
+	const avgSpeed = (abs(dyL) + abs(dyR)) * 0.5;
+	const combinedDy = dyL + dyR;
 	const speedThreshold = scaleSpeedForWindow(uiConfig.panel.moveSpeedThreshold);
 
-	// Panel moves up/down only if both locked claws are pinching and moving in same direction above threshold.
-	if (dragPanel.leftMagnet && dragPanel.rightMagnet && left.pinching && right.pinching && sameDirection && minSpeed >= speedThreshold) {
-		const dir = dyL > 0 ? 1 : -1;
-		dragPanel.velY = constrain(dir * minSpeed, -uiConfig.panel.dragMaxSpeed, uiConfig.panel.dragMaxSpeed);
+	// Panel moves up/down from combined tracked intent; hands do not need strict alignment.
+	const combinedIntent = dragPanel.leftMagnet && dragPanel.rightMagnet && left.pinching && right.pinching;
+	const combinedSpeed = abs(combinedDy) * 0.5;
+	if (combinedIntent && combinedSpeed >= speedThreshold) {
+		const dir = combinedDy > 0 ? 1 : -1;
+		const drive = max(minSpeed, avgSpeed * 0.75);
+		dragPanel.velY = constrain(dir * drive, -uiConfig.panel.dragMaxSpeed, uiConfig.panel.dragMaxSpeed);
 	} else {
 		dragPanel.velY *= uiConfig.panel.dragDamp;
 		// Feedback when one hand attempts to move but pair sync conditions are not met.
@@ -1052,7 +1057,7 @@ function updateDragPanelInteraction() {
 		if (!bothLocked) {
 			if (lAttempt) left.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.7);
 			if (rAttempt) right.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.7);
-		} else if (!(sameDirection && minSpeed >= speedThreshold)) {
+		} else if (!(combinedSpeed >= speedThreshold)) {
 			if (abs(dyL) > abs(dyR) + scaleSpeedForWindow(1.2) && lAttempt) {
 				left.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.55);
 			}
@@ -1374,6 +1379,9 @@ class oneHand {
 			this.uiLockOnComplete = null;
 			this.uiLockTargetPt = null;
 			if (cb) cb();
+			if (!isHandUiLocked(this) && !this.toolRequiredFeedbackPendingUnlock) {
+				forceClawControlToTracked(this);
+			}
 		}
 		return true;
 	}
@@ -1608,6 +1616,11 @@ class oneHand {
 		}
 		if (this.updateUiLockAnimation()) {
 			return;
+		}
+		if (this.toolRequiredFeedbackPendingUnlock && this.toolRequiredFeedbackLockPt) {
+			this.pinchPt.x = this.toolRequiredFeedbackLockPt.x;
+			this.pinchPt.y = this.toolRequiredFeedbackLockPt.y;
+			this.clawScale = lerp(this.clawScale, CLAW_PICKUP_SHRINK_SCALE, CLAW_SCALE_LERP);
 		}
 		const feedbackOwnsMotion = this.updateClawFeedbackAnimation();
 		if (this.isUiUnlockReturning) {

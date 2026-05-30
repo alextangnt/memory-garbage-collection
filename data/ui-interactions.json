@@ -11,7 +11,7 @@
     "syncDyThreshold": 6,
     "desyncReleaseThreshold": 15,
     "dragDamp": 0.86,
-    "dragMaxSpeed": 18,
+    "dragMaxSpeed": 40,
     "moveSpeedThreshold": 1.2
   },
   "drawer": {
