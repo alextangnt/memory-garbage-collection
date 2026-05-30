@@ -89,7 +89,7 @@ const DEFAULT_TOOL_CONFIG = {
 };
 const DEFAULT_UI_CONFIG = {
 	uiHitboxes: [],
-	panel: { x1: 400, y1: 40, x2: 1200, y2: 120, lockY: 80, dragDamp: 0.86, dragMaxSpeed: 18, moveSpeedThreshold: 1.2 },
+	panel: { x1: 450, y1: 850, x2: 1500, y2: 1000, lockY: 925, dragDamp: 0.86, dragMaxSpeed: 18, moveSpeedThreshold: 1.2 },
 	drawer: {
 		lockX: 1450, detachX: 1100, pullTriggerDx: 55, detachLerp: 0.62, detachDoneDist: 10, detachMaxFrames: 10,
 		toolDropLeftX: 1100, uiYOffset: 50,
@@ -112,6 +112,9 @@ const CLAW_FEEDBACK_JITTER_MAG = 15;
 const CLAW_FEEDBACK_LAUNCH_FRAMES = 11;
 const CLAW_FEEDBACK_LAUNCH_SCALE = 1.32;
 const PANEL_FAIL_JITTER_SPEED = 2.4;
+const PANEL_RETURN_FRAMES = 14;
+const PANEL_RETURN_BACK_RATIO = 0.28;
+const PANEL_RETURN_BACK_PIXELS = 40;
 
 let dragPanel = {
 	offsetY: 0,
@@ -126,7 +129,12 @@ let dragPanel = {
 	baseSpacing: 0,
 	lastLeftY: 0,
 	lastRightY: 0,
-	velY: 0
+	velY: 0,
+	initialOffsetY: 0,
+	returnAnimating: false,
+	returnFrame: 0,
+	returnStartOffsetY: 0,
+	wasAtVerticalBound: false
 };
 let drawerGrabState = {
 	left: null,
@@ -140,6 +148,51 @@ let binConsumeState = {
 	top: null,
 	bottom: null
 };
+let panelJitterOffsetX = 0;
+let panelJitterOffsetY = 0;
+let lidTopJitterOffsetX = 0;
+let lidTopJitterOffsetY = 0;
+let lidBottomJitterOffsetX = 0;
+let lidBottomJitterOffsetY = 0;
+let panelJitterState = { framesLeft: 0, mag: 0 };
+let lidJitterStateTop = { framesLeft: 0, mag: 0 };
+let lidJitterStateBottom = { framesLeft: 0, mag: 0 };
+
+function triggerPanelJitter(mag = 4, frames = 8) {
+	panelJitterState.framesLeft = max(panelJitterState.framesLeft, frames);
+	panelJitterState.mag = max(panelJitterState.mag, mag);
+}
+
+function triggerBinLidJitter(binIdx, mag = 4, frames = 8) {
+	// Bin indices map opposite to lid art ordering in current UI.
+	const tgt = binIdx === 0 ? lidJitterStateBottom : lidJitterStateTop;
+	tgt.framesLeft = max(tgt.framesLeft, frames);
+	tgt.mag = max(tgt.mag, mag);
+}
+
+function stepJitterState(stateObj) {
+	if (!stateObj || stateObj.framesLeft <= 0) return { x: 0, y: 0 };
+	const t = stateObj.framesLeft / max(1, stateObj.framesLeft + 1);
+	const m = stateObj.mag * t;
+	stateObj.framesLeft--;
+	if (stateObj.framesLeft <= 0) {
+		stateObj.mag = 0;
+		return { x: 0, y: 0 };
+	}
+	return { x: random(-m, m), y: random(-m, m) };
+}
+
+function updateUiJitterOffsets() {
+	const p = stepJitterState(panelJitterState);
+	panelJitterOffsetX = p.x;
+	panelJitterOffsetY = p.y;
+	const a = stepJitterState(lidJitterStateTop);
+	lidTopJitterOffsetX = a.x;
+	lidTopJitterOffsetY = a.y;
+	const b = stepJitterState(lidJitterStateBottom);
+	lidBottomJitterOffsetX = b.x;
+	lidBottomJitterOffsetY = b.y;
+}
 
 function vdist(p1,p2){
 	return dist(p1.x,p1.y,p2.x,p2.y)
@@ -823,14 +876,15 @@ function updateBinGrabInteractions() {
 		st.lastSpeed = speed;
 		st.peakSpeed = max(st.peakSpeed, speed);
 		st.lastTrackedPt = h.trackedPinchPt.copy();
-		if (h.pinching && speed >= speedThreshold) {
-			st.highWhilePinched = true;
-			// High-speed while held but no release yet: show "not yet" feedback once.
-			if (!st.highHoldJittered) {
-				h.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG);
-				st.highHoldJittered = true;
+			if (h.pinching && speed >= speedThreshold) {
+				st.highWhilePinched = true;
+				// High-speed while held but no release yet: show "not yet" feedback once.
+				if (!st.highHoldJittered) {
+					h.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG);
+					triggerBinLidJitter(st.binIndex);
+					st.highHoldJittered = true;
+				}
 			}
-		}
 		if (!h.pinching) {
 			// Mirror small-throw detection style: use sampled tracked velocity history.
 			let sampledSpeed = st.lastSpeed;
@@ -852,10 +906,11 @@ function updateBinGrabInteractions() {
 				triggerBinOpen(st.binIndex);
 				const launchVel = sampledDir.mag() > 0.001 ? sampledDir.copy() : p5.Vector.sub(h.trackedPinchPt, h.pinchPt);
 				h.startClawLaunch(launchVel, CLAW_FEEDBACK_LAUNCH_SCALE, CLAW_FEEDBACK_LAUNCH_FRAMES);
-			} else {
-				// Explicit release with insufficient speed is a failed interaction.
-				h.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG);
-			}
+				} else {
+					// Explicit release with insufficient speed is a failed interaction.
+					h.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG);
+					triggerBinLidJitter(st.binIndex);
+				}
 			clearBinGrabForSide(h.handSide);
 			continue;
 		}
@@ -977,17 +1032,75 @@ function maybeDockToolIntoDrawer(toolG) {
 }
 
 function updateDragPanelInteraction() {
+	const stepPanelReturnAnimation = () => {
+		if (!dragPanel.returnAnimating) return false;
+		dragPanel.returnFrame++;
+		const total = max(2, PANEL_RETURN_FRAMES);
+		const t = constrain(dragPanel.returnFrame / total, 0, 1);
+		const start = dragPanel.returnStartOffsetY;
+		const target = dragPanel.initialOffsetY;
+		const dir = Math.sign(target - start) || 1;
+		const backDist = min(abs(target - start) * 0.5, PANEL_RETURN_BACK_PIXELS);
+		const pivot = start - dir * backDist;
+		const split = PANEL_RETURN_BACK_RATIO;
+		let nextOffset;
+		if (t < split) {
+			const u = t / split;
+			nextOffset = lerp(start, pivot, u);
+		} else {
+			const u = (t - split) / (1 - split);
+			nextOffset = lerp(pivot, target, u);
+		}
+		dragPanel.offsetY = nextOffset;
+		dragPanel.prevOffsetY = nextOffset;
+		if (t >= 1 || abs(nextOffset - target) <= 0.5) {
+			dragPanel.offsetY = target;
+			dragPanel.prevOffsetY = target;
+			dragPanel.returnAnimating = false;
+		}
+		return true;
+	};
+
+	const panelLockYNow = uiConfig.panel.lockY + dragPanel.offsetY;
+	const shouldReturnToInitial =
+		!dragPanel.leftMagnet &&
+		!dragPanel.rightMagnet &&
+		panelLockYNow <= 300 &&
+		abs(dragPanel.offsetY - dragPanel.initialOffsetY) > 0.5;
+	if (shouldReturnToInitial && !dragPanel.returnAnimating) {
+		dragPanel.returnAnimating = true;
+		dragPanel.returnFrame = 0;
+		dragPanel.returnStartOffsetY = dragPanel.offsetY;
+	}
+
 	const left = getHandBySide("left");
 	const right = getHandBySide("right");
+	const applyFreeDrift = () => {
+		const minOffsetY = -uiConfig.panel.y1;
+		const maxOffsetY = h - uiConfig.panel.y2;
+		if (abs(dragPanel.velY) > 0.01) {
+			dragPanel.offsetY = constrain(dragPanel.offsetY + dragPanel.velY, minOffsetY, maxOffsetY);
+			dragPanel.velY *= uiConfig.panel.dragDamp;
+			if (dragPanel.offsetY === minOffsetY || dragPanel.offsetY === maxOffsetY) {
+				dragPanel.velY = 0;
+			}
+		}
+	};
 	if (!left || !right) {
 		dragPanel.engaged = false;
 		dragPanel.leftMagnet = false;
 		dragPanel.rightMagnet = false;
 		dragPanel.leftPrevPinch = left ? left.pinching : false;
 		dragPanel.rightPrevPinch = right ? right.pinching : false;
-		dragPanel.velY *= uiConfig.panel.dragDamp;
-		dragPanel.prevOffsetY = dragPanel.offsetY;
+		applyFreeDrift();
+		if (!stepPanelReturnAnimation()) {
+			dragPanel.prevOffsetY = dragPanel.offsetY;
+		}
 		return;
+	}
+
+	if (dragPanel.leftMagnet || dragPanel.rightMagnet) {
+		dragPanel.returnAnimating = false;
 	}
 
 	const panelDeltaY = dragPanel.offsetY - dragPanel.prevOffsetY;
@@ -1007,8 +1120,10 @@ function updateDragPanelInteraction() {
 	dragPanel.engaged = dragPanel.leftMagnet || dragPanel.rightMagnet;
 
 	if (!dragPanel.engaged) {
-		dragPanel.velY *= uiConfig.panel.dragDamp;
-		dragPanel.prevOffsetY = dragPanel.offsetY;
+		applyFreeDrift();
+		if (!stepPanelReturnAnimation()) {
+			dragPanel.prevOffsetY = dragPanel.offsetY;
+		}
 		dragPanel.leftPrevPinch = left.pinching;
 		dragPanel.rightPrevPinch = right.pinching;
 		return;
@@ -1055,14 +1170,22 @@ function updateDragPanelInteraction() {
 		const rAttempt = dragPanel.rightMagnet && right.pinching && abs(dyR) >= scaleSpeedForWindow(PANEL_FAIL_JITTER_SPEED);
 		const bothLocked = dragPanel.leftMagnet && dragPanel.rightMagnet;
 		if (!bothLocked) {
-			if (lAttempt) left.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.7);
-			if (rAttempt) right.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.7);
+			if (lAttempt) {
+				left.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.7);
+				triggerPanelJitter();
+			}
+			if (rAttempt) {
+				right.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.7);
+				triggerPanelJitter();
+			}
 		} else if (!(combinedSpeed >= speedThreshold)) {
 			if (abs(dyL) > abs(dyR) + scaleSpeedForWindow(1.2) && lAttempt) {
 				left.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.55);
+				triggerPanelJitter();
 			}
 			if (abs(dyR) > abs(dyL) + scaleSpeedForWindow(1.2) && rAttempt) {
 				right.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.55);
+				triggerPanelJitter();
 			}
 		}
 	}
@@ -1073,6 +1196,11 @@ function updateDragPanelInteraction() {
 	if (dragPanel.offsetY === minOffsetY || dragPanel.offsetY === maxOffsetY) {
 		dragPanel.velY = 0;
 	}
+	const atBoundNow = (dragPanel.offsetY === minOffsetY || dragPanel.offsetY === maxOffsetY);
+	if (atBoundNow && !dragPanel.wasAtVerticalBound) {
+		triggerPanelJitter();
+	}
+	dragPanel.wasAtVerticalBound = atBoundNow;
 	dragPanel.prevOffsetY = dragPanel.offsetY;
 	dragPanel.leftPrevPinch = left.pinching;
 	dragPanel.rightPrevPinch = right.pinching;
@@ -1604,7 +1732,7 @@ class oneHand {
 			this.uiLockOnComplete = null;
 		}
 		const uiLockedNow = isHandUiLocked(this);
-		if (this.wasUiLockedLastFrame && !uiLockedNow) {
+		if (this.wasUiLockedLastFrame && !uiLockedNow && !this.toolRequiredFeedbackPendingUnlock) {
 			this.isUiUnlockReturning = true;
 		}
 		this.wasUiLockedLastFrame = uiLockedNow;
@@ -1660,34 +1788,32 @@ class oneHand {
 		}
 
 		if (!pinchTargetResolved && !anyPanelLocked() && this.reconnectGrabCooldown <= 0 && justPinched && this.grabbed == null && !this.isPickupAnimating){
-			// Feedback when pinching directly on zones that require a tool.
-			if (tryAnimateToolRequiredHitboxFeedback(this)) {
-				pinchTargetResolved = true;
+			let currClosestD = w;
+			let currClosest = null;
+			for (let i=0; i<grabbables.length; i++){
+				let g = grabbables[i]
+				if (!g.active) {
+					continue;
+				}
+				const hb = (interactionModel && g.modelHitboxId) ? interactionModel.hitboxesById.get(g.modelHitboxId) : null;
+				if (hb && hb.mode && hb.mode !== "grab") {
+					continue;
+				}
+				if (g.minPinchGeneration > this.currentPinchGeneration) {
+					continue;
+				}
+				let d = vdist(this.pinchPt,g.pt)
+				if (d<(g.s * PINCH_TRIGGER_RANGE_SCALE / getWindowScaleFactor()) && d<=currClosestD){
+					currClosestD = d
+					currClosest = g
+				}
 			}
-			if (!pinchTargetResolved) {
-            	let currClosestD = w;
-            	let currClosest = null;
-            	for (let i=0; i<grabbables.length; i++){
-                	let g = grabbables[i]
-					if (!g.active) {
-						continue;
-					}
-					const hb = (interactionModel && g.modelHitboxId) ? interactionModel.hitboxesById.get(g.modelHitboxId) : null;
-					if (hb && hb.mode && hb.mode !== "grab") {
-						continue;
-					}
-					if (g.minPinchGeneration > this.currentPinchGeneration) {
-						continue;
-					}
-                	let d = vdist(this.pinchPt,g.pt)
-                	if (d<(g.s * PINCH_TRIGGER_RANGE_SCALE / getWindowScaleFactor()) && d<=currClosestD){
-                    	currClosestD = d
-                    	currClosest = g
-                	}
-            	}
-            	if (currClosest != null) {
-                	this.startPickupAnimation(currClosest);
-            	}
+			if (currClosest != null) {
+				this.startPickupAnimation(currClosest);
+				pinchTargetResolved = true;
+			} else if (tryAnimateToolRequiredHitboxFeedback(this)) {
+				// Only error-feedback if no regular grabbable pickup was possible.
+				pinchTargetResolved = true;
 			}
         }
 
@@ -2318,6 +2444,7 @@ function drawWeg() {
   //image(video, 0, 0, width, height);
 	pop();
 
+	updateUiJitterOffsets();
 	handTracker.ud();
 	updateDragPanelInteraction();
 	updateDrawerGrabInteractions();
@@ -2330,6 +2457,7 @@ function drawWeg() {
 	renderGrabbablesUnderClaws();
 	drawHands();
 	renderGrabbablesOverClaws();
+	drawPanelClipDifferenceOverlay();
 	// updateHand();
 	// handTracker.display();
 	stroke(255,0,0)
@@ -2412,6 +2540,111 @@ function drawDebugInteractableHitboxes() {
 		circle(p.x, p.y, baseR * 2);
 	}
 	pop();
+}
+
+function drawGrabbableVisualSnapshot(g) {
+	if (!g || !g.visible || !g.pic) return;
+	push();
+	imageMode(CENTER);
+	translate(g.pt.x, g.pt.y);
+	push();
+	rotate(g.currentRotation);
+	scale(g.currentScale);
+	if (isToolItem(g.itemID) && g.grabbedByHandSide === "left") {
+		scale(-1, 1);
+	}
+	image(g.pic, 0, 0);
+	pop();
+	pop();
+}
+
+function drawPanelClipDifferenceOverlay() {
+	const clipCfg = uiConfig.panelClip || {};
+	const hasRawCorners =
+		typeof clipCfg.x1 === "number" &&
+		typeof clipCfg.y1 === "number" &&
+		typeof clipCfg.x2 === "number" &&
+		typeof clipCfg.y2 === "number";
+	const insetX = (typeof clipCfg.insetX === "number") ? clipCfg.insetX : 50;
+	const extendY = (typeof clipCfg.extendY === "number") ? clipCfg.extendY : 50;
+	const x1 = hasRawCorners ? clipCfg.x1 : (uiConfig.panel.x1 + insetX);
+	const x2 = hasRawCorners ? clipCfg.x2 : (uiConfig.panel.x2 - insetX);
+	const y1Base = hasRawCorners ? clipCfg.y1 : (uiConfig.panel.y1 - extendY);
+	const y2Base = hasRawCorners ? clipCfg.y2 : (uiConfig.panel.y2 + extendY);
+	const y1 = y1Base + dragPanel.offsetY;
+	const y2 = y2Base + dragPanel.offsetY;
+	if (x2 <= x1 || y2 <= y1) return;
+
+	push();
+	drawingContext.save();
+	drawingContext.beginPath();
+	drawingContext.rect(x1, y1, x2 - x1, y2 - y1);
+	drawingContext.clip();
+
+	noStroke();
+	fill(255);
+	rectMode(CORNERS);
+	rect(x1, y1, x2, y2);
+
+	blendMode(BLEND);
+	imageMode(CENTER);
+	if (typeof background_xray !== "undefined" && background_xray) {
+		image(background_xray, wc, hc);
+	}
+	if (typeof bedTrackBody !== "undefined") {
+		if (bedTrackBody === 1 && typeof body1_xray !== "undefined" && body1_xray) {
+			image(body1_xray, bedTrackX, bedTrackY);
+		} else if (bedTrackBody === 2 && typeof body2_xray !== "undefined" && body2_xray) {
+			image(body2_xray, bedTrackX, bedTrackY);
+		}
+	}
+
+	blendMode(DIFFERENCE);
+	drawBodyGrabbablePartsDifference();
+	for (let i = 0; i < grabbables.length; i++) {
+		drawGrabbableVisualSnapshot(grabbables[i]);
+	}
+	blendMode(BLEND);
+
+	drawingContext.restore();
+	pop();
+}
+
+function drawBodyGrabbablePartsDifference() {
+	if (typeof bedTrackBody === "undefined") return;
+	const x = bedTrackX;
+	const y = bedTrackY;
+	imageMode(CENTER);
+	if (bedTrackBody === 1) {
+		const hasArm = !hasModelItemBeenInteracted("b1_arm");
+		const hasLeg = !hasModelItemBeenInteracted("b1_leg");
+		const hasEyeball = !hasModelHitboxBeenGrabbed("b1_eye_ball");
+		if (hasArm && typeof body1arm !== "undefined" && body1arm) image(body1arm, x, y);
+		if (hasLeg && typeof body1leg !== "undefined" && body1leg) image(body1leg, x, y);
+		if (hasEyeball && typeof body1eyeball !== "undefined" && body1eyeball) image(body1eyeball, x, y);
+		return;
+	}
+	if (bedTrackBody === 2) {
+		const hasKnee = !hasModelItemBeenInteracted("b2_knee");
+		const hasHand = !hasModelItemBeenInteracted("b2_hand");
+		const hasHeart = !hasModelItemBeenInteracted("b2_heart");
+		const hasRibs = !hasModelItemBeenInteracted("b2_rib");
+		if (hasKnee && typeof body2knee !== "undefined" && body2knee) image(body2knee, x, y);
+		if (hasHand && typeof body2hand !== "undefined" && body2hand) image(body2hand, x, y);
+		if (hasRibs && typeof body2ribs !== "undefined" && body2ribs) image(body2ribs, x, y);
+		if (hasHeart && typeof body2heart !== "undefined" && body2heart) image(body2heart, x, y);
+		return;
+	}
+	if (bedTrackBody === 3) {
+		const hasFoot = !hasModelItemBeenInteracted("b3_foot");
+		const hasSkull = !hasModelItemBeenInteracted("b3_skull");
+		const hasGuts = !hasModelItemBeenInteracted("b3_guts");
+		const hasSkin = !hasModelItemBeenInteracted("b3_skin");
+		const hasBrain = !hasModelItemBeenInteracted("b3_brain");
+		if (hasFoot && typeof body3foot !== "undefined" && body3foot) image(body3foot, x, y);
+		if (hasGuts && (!hasSkin) && typeof body3guts !== "undefined" && body3guts) image(body3guts, x, y);
+		if (hasBrain && (!hasSkull) && typeof body3brain !== "undefined" && body3brain) image(body3brain, x, y);
+	}
 }
 
 function renderGrabbablesUnderClaws() {

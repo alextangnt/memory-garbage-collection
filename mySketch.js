@@ -2,6 +2,9 @@ noslidein = false;
 let mainCanvas;
 const BASE_W = 1620;
 const BASE_H = 1080;
+let bedTrackX = 0;
+let bedTrackY = 0;
+let bedTrackBody = 1;
 let frameNowMs = 0;
 const DEBUG_MODE = true; // Toggle debug controls here.
 let debugTimerPaused = false;
@@ -81,6 +84,12 @@ function setup() {
 	framesCounted=0;
 	
 	setupWeg();
+	if (typeof dragPanel !== "undefined" && typeof uiConfig !== "undefined" && uiConfig.panel) {
+		dragPanel.offsetY = -uiConfig.panel.y1;
+		dragPanel.prevOffsetY = dragPanel.offsetY;
+		dragPanel.initialOffsetY = dragPanel.offsetY;
+		dragPanel.returnAnimating = false;
+	}
 	applyResponsiveCanvasScale();
 	
 	scalpelInUse = false;
@@ -224,22 +233,22 @@ function draw() {
 	translate(0, 50);
 	if(alkalineIsOpen)
 		{
-			image(can1_open, wc, hc);
+			image(can1_open, wc + (lidTopJitterOffsetX || 0), hc + (lidTopJitterOffsetY || 0));
 			can1_close.reset();
 		}
 	else
 		{
-			image(can1_close, wc, hc);
+			image(can1_close, wc + (lidTopJitterOffsetX || 0), hc + (lidTopJitterOffsetY || 0));
 			can1_open.reset()
 		}
 	if(lithiumIsOpen)
 		{
-			image(can2_open, wc, hc);
+			image(can2_open, wc + (lidBottomJitterOffsetX || 0), hc + (lidBottomJitterOffsetY || 0));
 			can2_close.reset()
 		}
 	else
 		{
-			image(can2_close, wc, hc);
+			image(can2_close, wc + (lidBottomJitterOffsetX || 0), hc + (lidBottomJitterOffsetY || 0));
 			can2_open.reset()
 		}
 	if (scalpelInUse == true)
@@ -328,6 +337,10 @@ function draw() {
 	image(rightCab, wc, hc);
 	pop();
 	drawWeg();
+	if (typeof panelOverlay !== "undefined" && panelOverlay) {
+		// Draw panel art above clipped xray/difference layers.
+		image(panelOverlay, wc + (panelJitterOffsetX || 0), hc + (dragPanel?.offsetY || 0) + (panelJitterOffsetY || 0));
+	}
 	noStroke();
 	
 	if (millis() <= textTimer) {
@@ -707,6 +720,9 @@ function entered(tool)
 }
 
 function drawBody1(x, y) {
+	bedTrackX = x;
+	bedTrackY = y;
+	bedTrackBody = 1;
 	const hasArm = !hasModelItemBeenInteracted("b1_arm");
 	const hasLeg = !hasModelItemBeenInteracted("b1_leg");
 	const hasEyeball = !hasModelHitboxBeenGrabbed("b1_eye_ball");
@@ -741,6 +757,9 @@ function drawBody1(x, y) {
 }
 
 function drawBody2(x, y) {
+	bedTrackX = x;
+	bedTrackY = y;
+	bedTrackBody = 2;
 	const hasKnee = !hasModelItemBeenInteracted("b2_knee");
 	const hasHand = !hasModelItemBeenInteracted("b2_hand");
 	const hasHeart = !hasModelItemBeenInteracted("b2_heart");
@@ -783,6 +802,9 @@ function drawBody2(x, y) {
 }
 
 function drawBody3(x, y) {
+	bedTrackX = x;
+	bedTrackY = y;
+	bedTrackBody = 3;
 	const hasFoot = !hasModelItemBeenInteracted("b3_foot");
 	const hasSkull = !hasModelItemBeenInteracted("b3_skull");
 	const hasGuts = !hasModelItemBeenInteracted("b3_guts");
@@ -881,6 +903,8 @@ function importDrawings() {
 	body3_guts_severed = loadImage("assets/images/bodies/body3_guts_severed.png");
 	body3_foot_severed = loadImage("assets/images/bodies/body3_foot_severed.png");
 	body3_brain_severed = loadImage("assets/images/bodies/body3_brain_severed.png");
+	body1_xray = loadImage("assets/images/bodies/body1_xray.png");
+	body2_xray = loadImage("assets/images/bodies/body2_xray.png");
 	
 	rightCab = loadImage("assets/images/ui/right_cabinet.png");
 	r1open = loadImage("assets/images/ui/top_right_open2.gif");
@@ -898,6 +922,7 @@ function importDrawings() {
 	clock = loadImage("assets/images/ui/timer.gif");
 	screen = loadImage("assets/images/ui/screen.gif");
 	bed = loadImage("assets/images/ui/bed.png");
+	background_xray = loadImage("assets/images/ui/background_xray.png");
 	l1 = loadImage("assets/images/ui/top_left.png");
 	l2 = loadImage("assets/images/ui/low_left.png");
 	chutes = loadImage("assets/images/ui/chutes.png");
@@ -908,6 +933,7 @@ function importDrawings() {
 	hammer = loadImage("assets/images/tools/hammer.png");
 	bonesaw = loadImage("assets/images/tools/bonesaw.png");
 	scalpel = loadImage("assets/images/tools/scalpel.png");
+	panelOverlay = loadImage("assets/images/tools/panel.png");
 	
 	blowup = loadImage("assets/images/effects/blowup.gif");
 	can2_open = loadImage("assets/images/effects/can2_open.gif");
