@@ -15,7 +15,7 @@ function preload() {
 }
 function setup() {
 	incinerateTimer = 0;
-	doneIncinerating = 6000;
+	doneIncinerating = 3000;
 	restartBuffer = 50;
 	body2Setted = false;
 	body3Setted = false;
@@ -255,6 +255,7 @@ function draw() {
 				scalpelG.active = true;
 				scalpelG.isConsumed = false;
 				scalpelG.visible = false;
+				scalpelG.wasGrabbedLastFrame = false;
 			}
 			r1close.reset();
 		}
@@ -271,7 +272,7 @@ function draw() {
 	
 	if (bonesawInUse == true)
 		{
-			image(r2open, wc, hc);
+			image(r2empty, wc, hc);
 		}
 	else if (r2isOpen == 1)
 		{
@@ -282,6 +283,7 @@ function draw() {
 				bonesawG.active = true;
 				bonesawG.isConsumed = false;
 				bonesawG.visible = false;
+				bonesawG.wasGrabbedLastFrame = false;
 			}
 			r2close.reset();
 		}
@@ -297,7 +299,7 @@ function draw() {
 		}
 	if (hammerInUse == true)
 		{
-			image(r3open, wc, hc);
+			image(r3empty, wc, hc);
 		}
 	else if (r3isOpen == 1)
 		{
@@ -308,6 +310,7 @@ function draw() {
 				hammerG.active = true;
 				hammerG.isConsumed = false;
 				hammerG.visible = false;
+				hammerG.wasGrabbedLastFrame = false;
 			}
 			r3close.reset();
 		}
@@ -788,14 +791,14 @@ function drawBody3(x, y) {
 	const hasFlap = !hasModelItemBeenInteracted("b3_flap");
   image(bed, x, y)
   image(body3, x, y);
-  if(hasFoot)
-    {
-      image(body3foot, x, y);
-    }
 	if(!hasSkull)
 		{
 			image(body3blood,x,y);
 		}
+  if(hasFoot)
+    {
+      image(body3foot, x, y);
+    }
   if(hasGuts && (!hasSkin))
     {
       image(body3guts, x, y);
@@ -887,9 +890,11 @@ function importDrawings() {
 	r2open = loadImage("assets/images/ui/mid_right_open2.gif");
 	r2close = loadImage("assets/images/ui/mid_right_close2.gif");
 	r2 = loadImage("assets/images/ui/mid_right.png");
+	r2empty = loadImage("assets/images/ui/mid_right_empty.png");
 	r3open = loadImage("assets/images/ui/low_right_open2.gif");
 	r3close = loadImage("assets/images/ui/low_right_close2.gif");
 	r3 = loadImage("assets/images/ui/low_right.png");
+	r3empty = loadImage("assets/images/ui/low_right_empty.png");
 	clock = loadImage("assets/images/ui/timer.gif");
 	screen = loadImage("assets/images/ui/screen.gif");
 	bed = loadImage("assets/images/ui/bed.png");

@@ -1,0 +1,41 @@
+{
+  "rightToolAngle": -45,
+  "leftToolAngle": 45,
+  "interactionRadiusFactor": 1.0,
+  "tipAxisOffsetDeg": -90,
+  "cutCooldownFrames": 10,
+  "cutSustainFramesScalpel": 8,
+  "cutSustainFramesBonesaw": 8,
+  "cutSustainFramesHammer": 8,
+  "cutScalpelMinSpeed": 4,
+  "cutScalpelMaxSpeed": 10,
+  "cutBonesawMinSpeed": 10,
+  "cutHammerMinSpeed": 15,
+  "toolPreviewAngleDeltaDeg": 15,
+  "toolPreviewClawScale": 0.9,
+  "toolPreviewToolScale": 0.85,
+  "toolVelocityChunkFrames": 4,
+  "toolSustainChunksRequired": 3,
+  "tools": {
+    "items": [
+      {
+        "itemId": "tool_scalpel",
+        "hitboxes": [
+          {"idName":"SCALPELG","hitboxId":"tool_scalpel_main","x":1320,"y":295,"radius":180,"picKey":"scalpel","toss":true,"interactionType":"tool_toggle","interactionData":{"flagName":"scalpelInUse"}}
+        ]
+      },
+      {
+        "itemId": "tool_bonesaw",
+        "hitboxes": [
+          {"idName":"BONESAWG","hitboxId":"tool_bonesaw_main","x":1333,"y":571,"radius":240,"picKey":"bonesaw","toss":true,"interactionType":"tool_toggle","interactionData":{"flagName":"bonesawInUse"}}
+        ]
+      },
+      {
+        "itemId": "tool_hammer",
+        "hitboxes": [
+          {"idName":"HAMMERG","hitboxId":"tool_hammer_main","x":1324,"y":883,"radius":170,"picKey":"hammer","toss":true,"interactionType":"tool_toggle","interactionData":{"flagName":"hammerInUse"}}
+        ]
+      }
+    ]
+  }
+}

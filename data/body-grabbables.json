@@ -29,28 +29,6 @@
       }
     ]
   },
-  "tools": {
-    "items": [
-      {
-        "itemId": "tool_scalpel",
-        "hitboxes": [
-          {"idName":"SCALPELG","hitboxId":"tool_scalpel_main","x":1320,"y":295,"radius":180,"picKey":"scalpel","toss":true,"interactionType":"tool_toggle","interactionData":{"flagName":"scalpelInUse"}}
-        ]
-      },
-      {
-        "itemId": "tool_bonesaw",
-        "hitboxes": [
-          {"idName":"BONESAWG","hitboxId":"tool_bonesaw_main","x":1333,"y":571,"radius":240,"picKey":"bonesaw","toss":true,"interactionType":"tool_toggle","interactionData":{"flagName":"bonesawInUse"}}
-        ]
-      },
-      {
-        "itemId": "tool_hammer",
-        "hitboxes": [
-          {"idName":"HAMMERG","hitboxId":"tool_hammer_main","x":1324,"y":883,"radius":170,"picKey":"hammer","toss":true,"interactionType":"tool_toggle","interactionData":{"flagName":"hammerInUse"}}
-        ]
-      }
-    ]
-  },
   "body2": {
     "items": [
       {
@@ -62,7 +40,8 @@
       {
         "itemId": "b2_knee",
         "hitboxes": [
-          {"idName":"B2KNEE","hitboxId":"b2_knee_main","x":653,"y":734,"radius":220,"picKey":"body2_knee_severed","active":false}
+          {"idName":"B2KNEE","hitboxId":"b2_knee_trigger","x":653,"y":734,"radius":220,"picKey":null,"active":false,"mode":"tool_zone","interactionMode":"cut_gesture","requiredTool":"tool_bonesaw","consumeOnInteract":true,"revealHitboxIds":["b2_knee_main"]},
+          {"idName":"B2KNEE2","hitboxId":"b2_knee_main","x":653,"y":734,"radius":220,"picKey":"body2_knee_severed","active":false,"toss":true}
         ]
       },
       {
@@ -86,7 +65,7 @@
       {
         "itemId": "b2_rib",
         "hitboxes": [
-          {"idName":"B2RIB","hitboxId":"b2_rib_main","x":801,"y":429,"radius":140,"picKey":null,"active":false,"toss":true,"consumeOnInteract":true,"revealHitboxIds":["b2_heart_main"]}
+          {"idName":"B2RIB","hitboxId":"b2_rib_main","x":801,"y":429,"radius":140,"picKey":null,"active":false,"toss":true,"mode":"tool_zone","interactionMode":"cut_gesture","requiredTool":"tool_hammer","consumeOnInteract":true,"revealHitboxIds":["b2_heart_main"]}
         ]
       }
     ]
@@ -126,7 +105,7 @@
       {
         "itemId": "b3_skull",
         "hitboxes": [
-          {"idName":"B3SKULL","hitboxId":"b3_skull_main","x":647,"y":242,"radius":150,"picKey":null,"active":false,"consumeOnInteract":true,"revealHitboxIds":["b3_brain_main"]}
+          {"idName":"B3SKULL","hitboxId":"b3_skull_main","x":647,"y":242,"radius":150,"picKey":null,"active":false,"mode":"tool_zone","interactionMode":"cut_gesture","requiredTool":"tool_hammer","consumeOnInteract":true,"revealHitboxIds":["b3_brain_main"]}
         ]
       }
     ]

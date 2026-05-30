@@ -28,13 +28,15 @@ let video;
 let hands = [];
 let hand = [];
 let bodyGrabbablesData = null;
+let uiInteractionsData = null;
+let toolConfigData = null;
 let interactionModel = null;
 let globalPinchGeneration = 0;
 let options = { maxHands: 2, flipHorizontal: true };
 let grabRenderCounter = 0;
 let s = 15
-const TRACKING_OVERFLOW_SCALE_X = 1.25;
-const TRACKING_OVERFLOW_SCALE_Y = 1.2;
+const TRACKING_OVERFLOW_SCALE_X = 1.5;
+const TRACKING_OVERFLOW_SCALE_Y = 1.45;
 const HAND_MAX = 2;
 const PINCH_CLOSE_RATIO = 0.3;
 const PINCH_OPEN_RATIO = 0.62;
@@ -51,7 +53,7 @@ const OFFSCREEN_RETREAT_FRAMES = 60;
 const OFFSCREEN_ARC_BOW = 70;
 const HAND_STALE_MS = 120;
 const RECONNECT_GRAB_COOLDOWN_FRAMES = 8;
-const GRAB_RANGE_SCALE = 0.7;
+const PINCH_TRIGGER_RANGE_SCALE = 0.7;
 const THROW_DECEL = 0.72;
 const THROW_SMALL_THRESHOLD = 12.2;
 const THROW_BIG_THRESHOLD = 30.2;
@@ -66,18 +68,79 @@ const PICKUP_ATTACH_DIST = 10;
 const PICKUP_RETURN_DIST = 12;
 const CLAW_PICKUP_SHRINK_SCALE = 0.82;
 const CLAW_SCALE_LERP = 0.3;
-const TOOL_RIGHT_ANGLE = -45;
-const TOOL_LEFT_ANGLE = 45;
-const TOOL_INTERACTION_RADIUS_FACTOR = 1.0;
-const TOOL_TIP_AXIS_OFFSET_DEG = -90;
-const CUT_COOLDOWN_FRAMES = 10;
-const CUT_SUSTAIN_FRAMES_SCALPEL = 5;
-const CUT_SUSTAIN_FRAMES_BONESAW = 8;
-const CUT_SUSTAIN_FRAMES_HAMMER = 8;
-const CUT_SCALPEL_MIN_SPEED = 4;
-const CUT_SCALPEL_MAX_SPEED = 10;
-const CUT_BONESAW_MIN_SPEED = 10;
-const CUT_HAMMER_MIN_SPEED = 15;
+const DEFAULT_TOOL_CONFIG = {
+	rightToolAngle: -45,
+	leftToolAngle: 45,
+	interactionRadiusFactor: 1.0,
+	tipAxisOffsetDeg: -90,
+	cutCooldownFrames: 10,
+	cutSustainFramesScalpel: 5,
+	cutSustainFramesBonesaw: 8,
+	cutSustainFramesHammer: 8,
+	cutScalpelMinSpeed: 4,
+	cutScalpelMaxSpeed: 10,
+	cutBonesawMinSpeed: 10,
+	cutHammerMinSpeed: 15,
+	toolPreviewAngleDeltaDeg: 5,
+	toolPreviewClawScale: 0.9,
+	toolPreviewToolScale: 0.9,
+	toolVelocityChunkFrames: 4,
+	toolSustainChunksRequired: 3,
+	tools: { items: [] }
+};
+const DEFAULT_UI_CONFIG = {
+	uiHitboxes: [],
+	panel: { x1: 400, y1: 40, x2: 1200, y2: 120, lockY: 80, dragDamp: 0.86, dragMaxSpeed: 18, moveSpeedThreshold: 1.2 },
+	drawer: {
+		lockX: 1450, detachX: 1100, pullTriggerDx: 55, detachLerp: 0.62, detachDoneDist: 10, detachMaxFrames: 10,
+		toolDropLeftX: 1100, uiYOffset: 50,
+		hitboxes: [
+			{ x1: 1400, y1: 150, x2: 1620, y2: 400, lockY: 275 },
+			{ x1: 1400, y1: 450, x2: 1620, y2: 700, lockY: 575 },
+			{ x1: 1400, y1: 750, x2: 1620, y2: 1000, lockY: 875 }
+		]
+	},
+	bins: {
+		lockX: 300, lockZoneX1: 250, lockZoneX2: 400, openSpeedThreshold: 12, consumeFrames: 30,
+		top: { x1: 0, y1: 200, x2: 400, y2: 500, centerX: 200, centerY: 350 },
+		bottom: { x1: 0, y1: 600, x2: 400, y2: 900, centerX: 200, centerY: 750 }
+	}
+};
+let toolConfig = JSON.parse(JSON.stringify(DEFAULT_TOOL_CONFIG));
+let uiConfig = JSON.parse(JSON.stringify(DEFAULT_UI_CONFIG));
+const CLAW_FEEDBACK_JITTER_FRAMES = 8;
+const CLAW_FEEDBACK_JITTER_MAG = 10;
+const CLAW_FEEDBACK_LAUNCH_FRAMES = 11;
+const CLAW_FEEDBACK_LAUNCH_SCALE = 1.32;
+const PANEL_FAIL_JITTER_SPEED = 2.4;
+
+let dragPanel = {
+	offsetY: 0,
+	prevOffsetY: 0,
+	engaged: false,
+	leftMagnet: false,
+	rightMagnet: false,
+	leftPrevPinch: false,
+	rightPrevPinch: false,
+	leftAnchorX: 0,
+	rightAnchorX: 0,
+	baseSpacing: 0,
+	lastLeftY: 0,
+	lastRightY: 0,
+	velY: 0
+};
+let drawerGrabState = {
+	left: null,
+	right: null
+};
+let binGrabState = {
+	left: null,
+	right: null
+};
+let binConsumeState = {
+	top: null,
+	bottom: null
+};
 
 function vdist(p1,p2){
 	return dist(p1.x,p1.y,p2.x,p2.y)
@@ -203,7 +266,7 @@ function registerModelHitbox(bodyKey, itemDef, hitboxDef, id, g, grabbableIndex)
 		revealHidden: !!hitboxDef.revealHidden,
 		interactionMode: hitboxDef.interactionMode || null,
 		requiredTool: hitboxDef.requiredTool || null,
-		cutCooldownFrames: hitboxDef.cutCooldownFrames || CUT_COOLDOWN_FRAMES,
+		cutCooldownFrames: hitboxDef.cutCooldownFrames || toolConfig.cutCooldownFrames,
 		requireFlagsTrue: Array.isArray(hitboxDef.requireFlagsTrue) ? hitboxDef.requireFlagsTrue : [],
 		onRequirementFail: hitboxDef.onRequirementFail || null,
 		clearScalpelInUse: !!hitboxDef.clearScalpelInUse,
@@ -411,8 +474,589 @@ function getToolGrabbable(toolItemId) {
 	return null;
 }
 
+function getHandBySide(side) {
+	if (!handTracker || !Array.isArray(handTracker.hands)) return null;
+	for (let i = 0; i < handTracker.hands.length; i++) {
+		const h = handTracker.hands[i];
+		if (h && h.handSide === side) return h;
+	}
+	return null;
+}
+
+function isPointInPanelHitbox(p) {
+	if (!p) return false;
+	const y1 = uiConfig.panel.y1 + dragPanel.offsetY;
+	const y2 = uiConfig.panel.y2 + dragPanel.offsetY;
+	return p.x >= uiConfig.panel.x1 && p.x <= uiConfig.panel.x2 && p.y >= y1 && p.y <= y2;
+}
+
+function pointRectDistance(px, py, x1, y1, x2, y2) {
+	const cx = constrain(px, x1, x2);
+	const cy = constrain(py, y1, y2);
+	return dist(px, py, cx, cy);
+}
+
+function isPointNearPanelForGrab(handObj) {
+	if (!handObj || !handObj.pinchPt) return false;
+	return isPointInPanelHitbox(handObj.pinchPt);
+}
+
+function anyPanelLocked() {
+	return !!(dragPanel.leftMagnet || dragPanel.rightMagnet);
+}
+
+function isPointNearRectForGrab(handObj, x1, y1, x2, y2) {
+	if (!handObj || !handObj.pinchPt) return false;
+	return handObj.pinchPt.x >= x1 && handObj.pinchPt.x <= x2 && handObj.pinchPt.y >= y1 && handObj.pinchPt.y <= y2;
+}
+
+function tryLockPanelOnPinchStart(handObj) {
+	if (!handObj || !isPointNearPanelForGrab(handObj)) return false;
+	if (handObj.grabbed) {
+		handObj.releaseGrab(false, false, false);
+	}
+	const lockY = uiConfig.panel.lockY + dragPanel.offsetY;
+	const lockX = handObj.pinchPt.x;
+	handObj.startUiLockAnimation(createVector(lockX, lockY), () => {
+		if (handObj.handSide === "left") {
+			dragPanel.leftMagnet = true;
+			dragPanel.leftAnchorX = lockX;
+			dragPanel.lastLeftY = handObj.trackedPinchPt.y;
+		} else {
+			dragPanel.rightMagnet = true;
+			dragPanel.rightAnchorX = lockX;
+			dragPanel.lastRightY = handObj.trackedPinchPt.y;
+		}
+		dragPanel.engaged = true;
+	});
+	return true;
+}
+
+function tryTriggerUiHitboxOnPinchStart(handObj) {
+	if (!handObj || anyPanelLocked()) return false;
+	for (let i = 0; i < uiConfig.uiHitboxes.length; i++) {
+		const hb = uiConfig.uiHitboxes[i];
+		if (!isPointNearRectForGrab(handObj, hb.x1, hb.y1, hb.x2, hb.y2)) {
+			continue;
+		}
+		triggerUiHandler(hb, handObj);
+		return true;
+	}
+	return false;
+}
+
+function triggerUiHandler(hitboxDef, handObj) {
+	if (!hitboxDef) return;
+	if (typeof hitboxDef.action === "function") {
+		hitboxDef.action();
+		return;
+	}
+	const key = hitboxDef.handlerKey || hitboxDef.actionKey;
+	if (!key) return;
+	if (key === "open_top_bin") {
+		triggerBinOpen(0);
+		return;
+	}
+	if (key === "open_bottom_bin") {
+		triggerBinOpen(1);
+		return;
+	}
+	if (key === "open_drawer_1") {
+		triggerDrawerOpen(0);
+		return;
+	}
+	if (key === "open_drawer_2") {
+		triggerDrawerOpen(1);
+		return;
+	}
+	if (key === "open_drawer_3") {
+		triggerDrawerOpen(2);
+		return;
+	}
+	if (key === "lock_panel" && handObj) {
+		tryLockPanelOnPinchStart(handObj);
+	}
+}
+
+function getBinDefByIndex(binIdx) {
+	return binIdx === 0 ? uiConfig.bins.top : uiConfig.bins.bottom;
+}
+
+function isBinOpen(binIdx) {
+	return binIdx === 0 ? !!lithiumIsOpen : !!alkalineIsOpen;
+}
+
+function setBinOpen(binIdx, openState) {
+	if (binIdx === 0) {
+		lithiumIsOpen = openState;
+	} else {
+		alkalineIsOpen = openState;
+	}
+}
+
+function triggerBinOpen(binIdx) {
+	if (!isBinOpen(binIdx)) {
+		if (drawerOpen && typeof drawerOpen.play === "function") drawerOpen.play();
+		setBinOpen(binIdx, true);
+	}
+}
+
+function triggerBinClose(binIdx) {
+	if (isBinOpen(binIdx)) {
+		if (drawerClose && typeof drawerClose.play === "function") drawerClose.play();
+		setBinOpen(binIdx, false);
+	}
+}
+
+function getBinIndexForPoint(p) {
+	if (!p) return -1;
+	// Pinch-start can happen anywhere inside the bin hitbox;
+	// lock animation then snaps toward BIN_LOCK_X.
+	if (p.x >= uiConfig.bins.top.x1 && p.x <= uiConfig.bins.top.x2 && p.y >= uiConfig.bins.top.y1 && p.y <= uiConfig.bins.top.y2) return 0;
+	if (p.x >= uiConfig.bins.bottom.x1 && p.x <= uiConfig.bins.bottom.x2 && p.y >= uiConfig.bins.bottom.y1 && p.y <= uiConfig.bins.bottom.y2) return 1;
+	return -1;
+}
+
+function clearBinGrabForSide(side) {
+	const key = side === "left" ? "left" : "right";
+	binGrabState[key] = null;
+}
+
+function tryStartBinGrabOnPinchStart(handObj) {
+	if (!handObj || anyPanelLocked()) return false;
+	const key = handObj.handSide === "left" ? "left" : "right";
+	if (binGrabState[key]) return false;
+	const binIdx = getBinIndexForPoint(handObj.pinchPt);
+	if (binIdx < 0) return false;
+	if (handObj.grabbed) {
+		handObj.releaseGrab(false, false, false);
+	}
+	// Bin lock/open handles are only active while the bin is closed.
+	if (isBinOpen(binIdx)) return false;
+	const lockY = handObj.pinchPt.y;
+	handObj.startUiLockAnimation(createVector(uiConfig.bins.lockX, lockY), () => {
+		if (isBinOpen(binIdx)) return;
+		binGrabState[key] = {
+			binIndex: binIdx,
+			lockY,
+			lastTrackedPt: handObj.trackedPinchPt.copy(),
+			peakSpeed: 0,
+			lastSpeed: 0,
+			highWhilePinched: false,
+			highHoldJittered: false
+		};
+	});
+	return true;
+}
+
+function getDrawerDefByIndex(drawerIdx) {
+	if (drawerIdx === 0) return uiConfig.drawer.hitboxes[0];
+	if (drawerIdx === 1) return uiConfig.drawer.hitboxes[1];
+	if (drawerIdx === 2) return uiConfig.drawer.hitboxes[2];
+	return null;
+}
+
+function getDrawerIndexForToolItemId(toolItemId) {
+	if (toolItemId === "tool_scalpel") return 0;
+	if (toolItemId === "tool_bonesaw") return 1;
+	if (toolItemId === "tool_hammer") return 2;
+	return -1;
+}
+
+function triggerDrawerOpen(drawerIdx) {
+	if (drawerIdx === 0) {
+		if (r1isOpen !== 1) {
+			if (drawerOpen && typeof drawerOpen.play === "function") drawerOpen.play();
+			r1isOpen = 1;
+		}
+		return;
+	}
+	if (drawerIdx === 1) {
+		if (r2isOpen !== 1) {
+			if (drawerOpen && typeof drawerOpen.play === "function") drawerOpen.play();
+			r2isOpen = 1;
+		}
+		return;
+	}
+	if (drawerIdx === 2) {
+		if (r3isOpen !== 1) {
+			if (drawerOpen && typeof drawerOpen.play === "function") drawerOpen.play();
+			r3isOpen = 1;
+		}
+	}
+}
+
+function drawerStateKeyForSide(side) {
+	return side === "left" ? "left" : "right";
+}
+
+function clearDrawerGrabForSide(side) {
+	drawerGrabState[drawerStateKeyForSide(side)] = null;
+}
+
+function forceClawControlToTracked(handObj) {
+	if (!handObj || !handObj.trackedPinchPt) return;
+	handObj.pinchPt.x = handObj.trackedPinchPt.x;
+	handObj.pinchPt.y = handObj.trackedPinchPt.y;
+	handObj.clearClawFeedbackState();
+	handObj.isUiLockAnimating = false;
+	handObj.uiLockTargetPt = null;
+	handObj.uiLockOnComplete = null;
+	handObj.isUiUnlockReturning = false;
+}
+
+function isHandUiLocked(handObj) {
+	if (!handObj) return false;
+	if (handObj.handSide === "left") {
+		return !!dragPanel.leftMagnet || !!drawerGrabState.left || !!binGrabState.left;
+	}
+	return !!dragPanel.rightMagnet || !!drawerGrabState.right || !!binGrabState.right;
+}
+
+function tryStartDrawerGrabOnPinchStart(handObj) {
+	if (!handObj || anyPanelLocked()) return false;
+	const sideKey = drawerStateKeyForSide(handObj.handSide);
+	if (drawerGrabState[sideKey]) return false;
+	const defs = uiConfig.drawer.hitboxes;
+	const drawerOpenStates = [r1isOpen, r2isOpen, r3isOpen];
+	for (let i = 0; i < defs.length; i++) {
+		// Original drawer handle hitboxes are only active while drawer is closed.
+		if (drawerOpenStates[i] === 1) {
+			continue;
+		}
+		const d = defs[i];
+		if (!isPointNearRectForGrab(handObj, d.x1, d.y1, d.x2, d.y2)) {
+			continue;
+		}
+		drawerGrabState[sideKey] = {
+			drawerIndex: i,
+			lockX: uiConfig.drawer.lockX,
+			lockY: d.lockY,
+			startTrackedX: handObj.trackedPinchPt.x,
+			detaching: false,
+			detachFrames: 0
+		};
+		handObj.startUiLockAnimation(createVector(uiConfig.drawer.lockX, d.lockY), null);
+		return true;
+	}
+	return false;
+}
+
+function updateDrawerGrabInteractions() {
+	if (!handTracker || !Array.isArray(handTracker.hands)) return;
+	if (!getHandBySide("left")) clearDrawerGrabForSide("left");
+	if (!getHandBySide("right")) clearDrawerGrabForSide("right");
+	for (let i = 0; i < handTracker.hands.length; i++) {
+		const h = handTracker.hands[i];
+		if (!h) continue;
+		const sideKey = drawerStateKeyForSide(h.handSide);
+		const st = drawerGrabState[sideKey];
+		if (!st) continue;
+		if (!h.pinching) {
+			clearDrawerGrabForSide(h.handSide);
+			continue;
+		}
+
+		if (st.detaching) {
+			h.pinchPt.x = lerp(h.pinchPt.x, uiConfig.drawer.detachX, uiConfig.drawer.detachLerp);
+			// Keep y locked during detach; fully unlock both axes only after animation ends.
+			h.pinchPt.y = st.lockY;
+			st.detachFrames++;
+			if (abs(h.pinchPt.x - uiConfig.drawer.detachX) <= uiConfig.drawer.detachDoneDist || st.detachFrames >= uiConfig.drawer.detachMaxFrames) {
+				// Explicit unlock: immediately return claw control to tracked pose.
+				forceClawControlToTracked(h);
+				h.wasUiLockedLastFrame = false;
+				clearDrawerGrabForSide(h.handSide);
+			}
+			continue;
+		}
+
+		h.pinchPt.x = st.lockX;
+		h.pinchPt.y = st.lockY;
+		const pullDx = st.startTrackedX - h.trackedPinchPt.x; // pull left to open
+		if (pullDx >= uiConfig.drawer.pullTriggerDx) {
+			triggerDrawerOpen(st.drawerIndex);
+			st.detaching = true;
+			st.detachFrames = 0;
+		}
+	}
+}
+
+function updateBinGrabInteractions() {
+	if (!handTracker || !Array.isArray(handTracker.hands)) return;
+	if (!getHandBySide("left")) clearBinGrabForSide("left");
+	if (!getHandBySide("right")) clearBinGrabForSide("right");
+	for (let i = 0; i < handTracker.hands.length; i++) {
+		const h = handTracker.hands[i];
+		if (!h) continue;
+		const key = h.handSide === "left" ? "left" : "right";
+		const st = binGrabState[key];
+		if (!st) continue;
+		const v = p5.Vector.sub(h.trackedPinchPt, st.lastTrackedPt);
+		const speed = v.mag();
+		const speedThreshold = scaleSpeedForWindow(uiConfig.bins.openSpeedThreshold);
+		st.lastSpeed = speed;
+		st.peakSpeed = max(st.peakSpeed, speed);
+		st.lastTrackedPt = h.trackedPinchPt.copy();
+		if (h.pinching && speed >= speedThreshold) {
+			st.highWhilePinched = true;
+			// High-speed while held but no release yet: show "not yet" feedback once.
+			if (!st.highHoldJittered) {
+				h.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG);
+				st.highHoldJittered = true;
+			}
+		}
+		if (!h.pinching) {
+			// Mirror small-throw detection style: use sampled tracked velocity history.
+			let sampledSpeed = st.lastSpeed;
+			let sampledDir = v.copy();
+			if (h.velocityHistory && h.velocityHistory.length > 0) {
+				const oldestCount = min(THROW_TIER_OLDEST_SAMPLE_COUNT, h.velocityHistory.length);
+				let sumSpeed = 0;
+				let sumDir = createVector(0, 0);
+				for (let j = 0; j < oldestCount; j++) {
+					sumSpeed += h.velocityHistory[j].speed;
+					sumDir.add(h.velocityHistory[j].v);
+				}
+				sampledSpeed = sumSpeed / oldestCount;
+				sumDir.div(oldestCount);
+				sampledDir = sumDir;
+			}
+			const releasedAtHighSpeed = sampledSpeed >= speedThreshold;
+			if (releasedAtHighSpeed) {
+				triggerBinOpen(st.binIndex);
+				const launchVel = sampledDir.mag() > 0.001 ? sampledDir.copy() : p5.Vector.sub(h.trackedPinchPt, h.pinchPt);
+				h.startClawLaunch(launchVel, CLAW_FEEDBACK_LAUNCH_SCALE, CLAW_FEEDBACK_LAUNCH_FRAMES);
+			} else {
+				// Explicit release with insufficient speed is a failed interaction.
+				h.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG);
+			}
+			clearBinGrabForSide(h.handSide);
+			continue;
+		}
+		h.pinchPt.x = uiConfig.bins.lockX;
+		h.pinchPt.y = st.lockY;
+	}
+}
+
+function startBinConsume(binKey, g, cx, cy) {
+	if (!g) return;
+	g.binConsumeActive = true;
+	g.binConsumeFrame = 0;
+	g.binConsumeStartPt = g.pt.copy();
+	g.binConsumeTargetPt = createVector(cx, cy);
+	g.binConsumeStartScale = g.currentScale;
+	g.binConsumeStartRot = g.currentRotation;
+	binConsumeState[binKey] = g;
+}
+
+function stepBinConsume(binIdx, binKey) {
+	const g = binConsumeState[binKey];
+	if (!g) return;
+	g.binConsumeFrame++;
+	const t = constrain(g.binConsumeFrame / uiConfig.bins.consumeFrames, 0, 1);
+	const eased = t * t * (3 - 2 * t);
+	g.pt.x = lerp(g.binConsumeStartPt.x, g.binConsumeTargetPt.x, eased * 0.65);
+	g.pt.y = lerp(g.binConsumeStartPt.y, g.binConsumeTargetPt.y, eased * 0.65);
+	g.currentScale = lerp(g.binConsumeStartScale, 0, t);
+	g.currentRotation = g.binConsumeStartRot + (t * 540);
+	if (t < 1) return;
+	g.binConsumeActive = false;
+	g.binConsumeFrame = 0;
+	toss(g);
+	g.active = false;
+	g.visible = false;
+	binConsumeState[binKey] = null;
+	triggerBinClose(binIdx);
+}
+
+function updateBinIntake() {
+	const bins = [
+		{ idx: 0, key: "top", def: uiConfig.bins.top },
+		{ idx: 1, key: "bottom", def: uiConfig.bins.bottom }
+	];
+	for (let b = 0; b < bins.length; b++) {
+		const entry = bins[b];
+		if (!isBinOpen(entry.idx)) {
+			binConsumeState[entry.key] = null;
+			continue;
+		}
+		if (binConsumeState[entry.key]) {
+			stepBinConsume(entry.idx, entry.key);
+			continue;
+		}
+		for (let i = 0; i < grabbables.length; i++) {
+			const g = grabbables[i];
+			if (!g || g.isGrabbed || g.binConsumeActive || !g.visible) continue;
+			if (g.pt.x < entry.def.x1 || g.pt.x > entry.def.x2 || g.pt.y < entry.def.y1 || g.pt.y > entry.def.y2) continue;
+			startBinConsume(entry.key, g, entry.def.centerX, entry.def.centerY);
+			break;
+		}
+	}
+}
+
+function maybeDockToolIntoDrawer(toolG) {
+	if (!toolG || !toolG.modelItemId || toolG.isGrabbed) return;
+	if (!toolG.hasEverBeenPickedUp) return;
+	// Latch a release event.
+	if (toolG.wasGrabbedLastFrame && !toolG.isGrabbed) {
+		toolG.pendingDrawerDock = true;
+	}
+	if (!toolG.pendingDrawerDock && !toolG.returningToDrawer) return;
+	const drawerIdx = getDrawerIndexForToolItemId(toolG.modelItemId);
+	if (drawerIdx < 0) return;
+	const dd = getDrawerDefByIndex(drawerIdx);
+	if (!dd) return;
+	const zoneY1 = dd.y1 + uiConfig.drawer.uiYOffset;
+	const zoneY2 = dd.y2 + uiConfig.drawer.uiYOffset;
+	const withinOpenZone = toolG.pt.x >= uiConfig.drawer.toolDropLeftX && toolG.pt.x <= dd.x2 && toolG.pt.y >= zoneY1 && toolG.pt.y <= zoneY2;
+
+	const isDrawerOpen = (drawerIdx === 0 && r1isOpen === 1) || (drawerIdx === 1 && r2isOpen === 1) || (drawerIdx === 2 && r3isOpen === 1);
+	if (!isDrawerOpen) return;
+
+	// Start return-to-drawer animation only if the released tool is in the correct open drawer zone.
+	if (!toolG.returningToDrawer) {
+		if (!withinOpenZone) return;
+		toolG.returningToDrawer = true;
+		toolG.returnDrawerIdx = drawerIdx;
+		toolG.isThrown = false;
+		toolG.throwVelocity.set(0, 0);
+		toolG.throwAngularVelocity = 0;
+		toolG.endBounceVelocity.set(0, 0);
+		toolG.endBounceAngularVelocity = 0;
+	}
+
+	toolG.pt.x = lerp(toolG.pt.x, toolG.origX, 0.33);
+	toolG.pt.y = lerp(toolG.pt.y, toolG.origY, 0.33);
+	toolG.currentScale = lerp(toolG.currentScale, toolG.baseScale, 0.35);
+	const arrived = dist(toolG.pt.x, toolG.pt.y, toolG.origX, toolG.origY) <= 10 && abs(toolG.currentScale - toolG.baseScale) <= 0.03;
+	if (!arrived) return;
+
+	toss(toolG);
+	toolG.visible = false;
+	toolG.active = false;
+	toolG.isConsumed = false;
+	toolG.pendingDrawerDock = false;
+	toolG.returningToDrawer = false;
+	toolG.returnDrawerIdx = -1;
+	if (drawerIdx === 0) {
+		scalpelInUse = false;
+		r1isOpen = -1;
+	} else if (drawerIdx === 1) {
+		bonesawInUse = false;
+		r2isOpen = -1;
+	} else if (drawerIdx === 2) {
+		hammerInUse = false;
+		r3isOpen = -1;
+	}
+}
+
+function updateDragPanelInteraction() {
+	const left = getHandBySide("left");
+	const right = getHandBySide("right");
+	if (!left || !right) {
+		dragPanel.engaged = false;
+		dragPanel.leftMagnet = false;
+		dragPanel.rightMagnet = false;
+		dragPanel.leftPrevPinch = left ? left.pinching : false;
+		dragPanel.rightPrevPinch = right ? right.pinching : false;
+		dragPanel.velY *= uiConfig.panel.dragDamp;
+		dragPanel.prevOffsetY = dragPanel.offsetY;
+		return;
+	}
+
+	const panelDeltaY = dragPanel.offsetY - dragPanel.prevOffsetY;
+	if (panelDeltaY !== 0) {
+		if (dragPanel.leftMagnet) left.pinchPt.y += panelDeltaY;
+		if (dragPanel.rightMagnet) right.pinchPt.y += panelDeltaY;
+	}
+
+	// Releasing pinch immediately unlocks that hand and stops panel momentum.
+	if (!left.pinching) {
+		dragPanel.leftMagnet = false;
+	}
+	if (!right.pinching) {
+		dragPanel.rightMagnet = false;
+	}
+
+	dragPanel.engaged = dragPanel.leftMagnet || dragPanel.rightMagnet;
+
+	if (!dragPanel.engaged) {
+		dragPanel.velY *= uiConfig.panel.dragDamp;
+		dragPanel.prevOffsetY = dragPanel.offsetY;
+		dragPanel.leftPrevPinch = left.pinching;
+		dragPanel.rightPrevPinch = right.pinching;
+		return;
+	}
+
+	if (dragPanel.leftMagnet && dragPanel.rightMagnet) {
+		dragPanel.baseSpacing = dragPanel.rightAnchorX - dragPanel.leftAnchorX;
+	}
+
+	const targetY = uiConfig.panel.lockY + dragPanel.offsetY;
+	if (dragPanel.leftMagnet) {
+		left.pinchPt.x = dragPanel.leftAnchorX;
+		left.pinchPt.y = targetY;
+		if (left.grabbed) left.grabbed.ud(left.getClawControlPt(), left.handSide);
+	}
+	if (dragPanel.rightMagnet) {
+		right.pinchPt.x = dragPanel.rightAnchorX;
+		right.pinchPt.y = targetY;
+		if (right.grabbed) right.grabbed.ud(right.getClawControlPt(), right.handSide);
+	}
+
+	const dyL = left.trackedPinchPt.y - dragPanel.lastLeftY;
+	const dyR = right.trackedPinchPt.y - dragPanel.lastRightY;
+	dragPanel.lastLeftY = left.trackedPinchPt.y;
+	dragPanel.lastRightY = right.trackedPinchPt.y;
+
+	const sameDirection = (dyL > 0 && dyR > 0) || (dyL < 0 && dyR < 0);
+	const minSpeed = min(abs(dyL), abs(dyR));
+	const speedThreshold = scaleSpeedForWindow(uiConfig.panel.moveSpeedThreshold);
+
+	// Panel moves up/down only if both locked claws are pinching and moving in same direction above threshold.
+	if (dragPanel.leftMagnet && dragPanel.rightMagnet && left.pinching && right.pinching && sameDirection && minSpeed >= speedThreshold) {
+		const dir = dyL > 0 ? 1 : -1;
+		dragPanel.velY = constrain(dir * minSpeed, -uiConfig.panel.dragMaxSpeed, uiConfig.panel.dragMaxSpeed);
+	} else {
+		dragPanel.velY *= uiConfig.panel.dragDamp;
+		// Feedback when one hand attempts to move but pair sync conditions are not met.
+		const lAttempt = dragPanel.leftMagnet && left.pinching && abs(dyL) >= scaleSpeedForWindow(PANEL_FAIL_JITTER_SPEED);
+		const rAttempt = dragPanel.rightMagnet && right.pinching && abs(dyR) >= scaleSpeedForWindow(PANEL_FAIL_JITTER_SPEED);
+		const bothLocked = dragPanel.leftMagnet && dragPanel.rightMagnet;
+		if (!bothLocked) {
+			if (lAttempt) left.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.7);
+			if (rAttempt) right.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.7);
+		} else if (!(sameDirection && minSpeed >= speedThreshold)) {
+			if (abs(dyL) > abs(dyR) + scaleSpeedForWindow(1.2) && lAttempt) {
+				left.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.55);
+			}
+			if (abs(dyR) > abs(dyL) + scaleSpeedForWindow(1.2) && rAttempt) {
+				right.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.55);
+			}
+		}
+	}
+
+	const minOffsetY = -uiConfig.panel.y1;
+	const maxOffsetY = h - uiConfig.panel.y2;
+	dragPanel.offsetY = constrain(dragPanel.offsetY + dragPanel.velY, minOffsetY, maxOffsetY);
+	if (dragPanel.offsetY === minOffsetY || dragPanel.offsetY === maxOffsetY) {
+		dragPanel.velY = 0;
+	}
+	dragPanel.prevOffsetY = dragPanel.offsetY;
+	dragPanel.leftPrevPinch = left.pinching;
+	dragPanel.rightPrevPinch = right.pinching;
+}
+
 function getToolAngleForSide(side) {
-	return side === "left" ? TOOL_LEFT_ANGLE : TOOL_RIGHT_ANGLE;
+	return side === "left" ? toolConfig.leftToolAngle : toolConfig.rightToolAngle;
+}
+
+function getToolPreviewAngleOffsetForSide(side, previewT) {
+	if (previewT <= 0) return 0;
+	// Right hand: counterclockwise (+deg). Left hand: clockwise (-deg).
+	const dir = side === "left" ? 1 : -1;
+	return dir * toolConfig.toolPreviewAngleDeltaDeg * previewT;
 }
 
 function getHeldToolTipPoint(toolObj, handSide) {
@@ -423,8 +1067,8 @@ function getHeldToolTipPoint(toolObj, handSide) {
 	// Compute local forward axis first, mirror locally if left, then rotate to world.
 	const rotDeg = toolObj.currentRotation;
 	const len = toolObj.s * 1.5;
-	let localX = cos(TOOL_TIP_AXIS_OFFSET_DEG);
-	const localY = sin(TOOL_TIP_AXIS_OFFSET_DEG);
+	let localX = cos(toolConfig.tipAxisOffsetDeg);
+	const localY = sin(toolConfig.tipAxisOffsetDeg);
 	if (handSide === "left") {
 		localX *= -1;
 	}
@@ -558,14 +1202,33 @@ class oneHand {
 		this.isPickupAnimating = false;
 		this.pickupTargetObj = null;
 		this.pickupStage = 0;
+		this.isUiLockAnimating = false;
+		this.uiLockTargetPt = null;
+		this.uiLockOnComplete = null;
+		this.isUiUnlockReturning = false;
+		this.wasUiLockedLastFrame = false;
 		this.clawScale = 1;
-		this.grabReach = 0;
+		this.renderPinchOffset = createVector(0, 0);
+		this.feedbackMode = null; // null | "jitter" | "launch"
+		this.feedbackFrame = 0;
+		this.feedbackTotalFrames = 0;
+		this.feedbackMag = 0;
+		this.feedbackLaunchVel = createVector(0, 0);
+		this.feedbackBaseScale = 1;
+		this.feedbackLaunchOffset = createVector(0, 0);
+		this.grabReach = s;
 		this.debugToolTip = null;
 		this.debugToolHits = [];
 		this.prevToolTip = null;
 		this.toolTipSpeed = 0;
 		this.cutGestureByHitboxId = new Map();
 		this.lastHeldToolItemId = null;
+		this.toolPreviewChunkSum = 0;
+		this.toolPreviewChunkCount = 0;
+		this.toolPreviewGoodChunks = 0;
+		this.toolPreviewBadChunks = 0;
+		this.toolPreviewActive = false;
+		this.toolPreviewT = 0;
 		this.updateFromDetection(hand);
 	}
 	
@@ -585,10 +1248,100 @@ class oneHand {
 		// Single source of truth for where a grabbed object should follow.
 		return this.pinchPt;
 	}
+	getRenderPinchPt() {
+		if (!this.feedbackMode) {
+			return this.pinchPt.copy();
+		}
+		return createVector(this.pinchPt.x + this.renderPinchOffset.x, this.pinchPt.y + this.renderPinchOffset.y);
+	}
+	clearClawFeedbackState() {
+		this.feedbackMode = null;
+		this.feedbackFrame = 0;
+		this.feedbackTotalFrames = 0;
+		this.feedbackMag = 0;
+		this.feedbackLaunchVel.set(0, 0);
+		this.feedbackLaunchOffset.set(0, 0);
+		this.renderPinchOffset.set(0, 0);
+	}
+	startClawJitter(frames = CLAW_FEEDBACK_JITTER_FRAMES, mag = CLAW_FEEDBACK_JITTER_MAG) {
+		if (this.feedbackMode === "launch") return;
+		this.feedbackMode = "jitter";
+		this.feedbackFrame = 0;
+		this.feedbackTotalFrames = max(1, int(frames));
+		this.feedbackMag = mag;
+	}
+	startClawLaunch(rawVel, targetScale = CLAW_FEEDBACK_LAUNCH_SCALE, frames = CLAW_FEEDBACK_LAUNCH_FRAMES) {
+		const v = rawVel ? rawVel.copy() : createVector(0, 0);
+		if (v.mag() < 0.001) {
+			v.set(this.handSide === "left" ? -1 : 1, 0);
+		}
+		v.normalize();
+		v.mult(scaleDistanceForWindow(42));
+		this.feedbackMode = "launch";
+		this.feedbackFrame = 0;
+		this.feedbackTotalFrames = max(2, int(frames));
+		this.feedbackLaunchVel = v;
+		this.feedbackBaseScale = max(1, targetScale);
+		this.feedbackLaunchOffset.set(0, 0);
+		this.isUiUnlockReturning = false;
+	}
+	updateClawFeedbackAnimation() {
+		this.renderPinchOffset.set(0, 0);
+		if (!this.feedbackMode) return false;
+		if (this.feedbackMode === "jitter") {
+			this.feedbackFrame++;
+			const t = constrain(this.feedbackFrame / this.feedbackTotalFrames, 0, 1);
+			const fade = (1 - t);
+			this.renderPinchOffset.set((random() * 2 - 1) * this.feedbackMag * fade, (random() * 2 - 1) * this.feedbackMag * fade);
+			if (this.feedbackFrame >= this.feedbackTotalFrames) {
+				this.feedbackMode = null;
+				this.renderPinchOffset.set(0, 0);
+			}
+			return false;
+		}
+		if (this.feedbackMode === "launch") {
+			this.feedbackFrame++;
+			const t = constrain(this.feedbackFrame / this.feedbackTotalFrames, 0, 1);
+			const pushCurve = sin(t * PI); // forward then back
+			this.feedbackLaunchOffset = p5.Vector.mult(this.feedbackLaunchVel, pushCurve);
+			this.renderPinchOffset = this.feedbackLaunchOffset.copy();
+			this.clawScale = lerp(this.clawScale, this.feedbackBaseScale, 0.45);
+			if (t >= 1) {
+				this.feedbackMode = null;
+				this.feedbackLaunchOffset.set(0, 0);
+				this.renderPinchOffset.set(0, 0);
+				this.isUiUnlockReturning = true;
+			}
+			return false;
+		}
+		return false;
+	}
 	startPickupAnimation(targetObj) {
 		this.isPickupAnimating = true;
 		this.pickupTargetObj = targetObj;
 		this.pickupStage = 1;
+	}
+	startUiLockAnimation(targetPt, onComplete) {
+		if (!targetPt) return;
+		this.isUiLockAnimating = true;
+		this.uiLockTargetPt = targetPt.copy();
+		this.uiLockOnComplete = (typeof onComplete === "function") ? onComplete : null;
+	}
+	updateUiLockAnimation() {
+		if (!this.isUiLockAnimating || !this.uiLockTargetPt) {
+			return false;
+		}
+		this.clawScale = lerp(this.clawScale, CLAW_PICKUP_SHRINK_SCALE, CLAW_SCALE_LERP);
+		this.pinchPt = p5.Vector.lerp(this.pinchPt, this.uiLockTargetPt, PICKUP_TO_OBJECT_LERP);
+		if (vdist(this.pinchPt, this.uiLockTargetPt) <= scaleDistanceForWindow(PICKUP_ATTACH_DIST)) {
+			this.pinchPt = this.uiLockTargetPt.copy();
+			this.isUiLockAnimating = false;
+			const cb = this.uiLockOnComplete;
+			this.uiLockOnComplete = null;
+			this.uiLockTargetPt = null;
+			if (cb) cb();
+		}
+		return true;
 	}
 	updatePickupAnimation() {
 		if (!this.isPickupAnimating || !this.pickupTargetObj) {
@@ -660,9 +1413,14 @@ class oneHand {
 		this.isPickupAnimating = false;
 		this.pickupTargetObj = null;
 		this.pickupStage = 0;
+		this.isUiLockAnimating = false;
+		this.uiLockTargetPt = null;
+		this.uiLockOnComplete = null;
+		this.isUiUnlockReturning = false;
 		if (resetLatestGrabbed) {
 			this.latestGrabbed = null;
 		}
+		this.clearClawFeedbackState();
 	}
 	updateFromDetection(hand) {
 		const wasMissing = this.missedFrames > 0;
@@ -693,7 +1451,12 @@ class oneHand {
 		const trackedVel = p5.Vector.sub(targetPinch, this.prevTrackedPinchPt);
 		this.prevTrackedPinchPt = targetPinch.copy();
 		this.trackedPinchPt = p5.Vector.lerp(this.trackedPinchPt, targetPinch, HAND_SMOOTH_ALPHA);
-		if (!this.isPickupAnimating) {
+		const clawMotionOwnedByAnimation =
+			this.isPickupAnimating ||
+			this.isUiLockAnimating ||
+			this.isUiUnlockReturning ||
+			this.feedbackMode === "launch";
+		if (!clawMotionOwnedByAnimation) {
 			this.pinchPt = this.trackedPinchPt.copy();
 		}
 		this.velocity = p5.Vector.lerp(this.velocity, p5.Vector.sub(this.pinchPt, prevPinch), 0.5);
@@ -752,6 +1515,10 @@ class oneHand {
 		if (!this.hand) {
 			return;
 		}
+		// Safety: never keep a stale visual offset if feedback mode is inactive.
+		if (!this.feedbackMode) {
+			this.renderPinchOffset.set(0, 0);
+		}
 		if (millis() - this.lastDetectionMs > HAND_STALE_MS) {
 			this.stepNoDetection();
 			return;
@@ -774,7 +1541,6 @@ class oneHand {
 		if (pinchRatio > PINCH_OPEN_RATIO) {
 			this.mustOpenBeforeNextInteraction = false;
 		}
-		s = palmScale * 0.8;
 		this.grabReach = s;
 		if (zigmode) this.checkzig()
 
@@ -789,11 +1555,42 @@ class oneHand {
 		} else {
 			this.pinchHold = max(0, this.pinchHold - 1);
 		}
+		// Safety: if not pinching and not actively locking, ensure we are not stuck in lock animation.
+		if (!this.pinching && !isHandUiLocked(this)) {
+			this.isUiLockAnimating = false;
+			this.uiLockTargetPt = null;
+			this.uiLockOnComplete = null;
+		}
+		const uiLockedNow = isHandUiLocked(this);
+		if (this.wasUiLockedLastFrame && !uiLockedNow) {
+			this.isUiUnlockReturning = true;
+		}
+		this.wasUiLockedLastFrame = uiLockedNow;
 		if (this.reconnectGrabCooldown > 0) {
 			this.reconnectGrabCooldown--;
 		}
-		if (!this.isPickupAnimating) {
+		if (!this.isPickupAnimating && !this.isUiLockAnimating && !uiLockedNow) {
 			this.clawScale = lerp(this.clawScale, 1, CLAW_SCALE_LERP);
+		}
+		if (this.updateUiLockAnimation()) {
+			return;
+		}
+		const feedbackOwnsMotion = this.updateClawFeedbackAnimation();
+		if (this.isUiUnlockReturning) {
+			this.pinchPt = p5.Vector.lerp(this.pinchPt, this.trackedPinchPt, PICKUP_RETURN_LERP);
+			this.clawScale = lerp(this.clawScale, 1, CLAW_SCALE_LERP);
+			if (vdist(this.pinchPt, this.trackedPinchPt) <= scaleDistanceForWindow(PICKUP_RETURN_DIST)) {
+				this.isUiUnlockReturning = false;
+			}
+		}
+		if (feedbackOwnsMotion) {
+			return;
+		}
+		const previewTarget = this.toolPreviewActive ? 1 : 0;
+		this.toolPreviewT = lerp(this.toolPreviewT, previewTarget, 0.35);
+		if (this.grabbed && isToolItem(this.grabbed.itemID)) {
+			const previewScaleTarget = lerp(1, toolConfig.toolPreviewClawScale, this.toolPreviewT);
+			this.clawScale = lerp(this.clawScale, previewScaleTarget, 0.35);
 		}
 		const justPinched = (!wasPinching && this.pinching);
 		if (justPinched) {
@@ -801,7 +1598,21 @@ class oneHand {
 			this.currentPinchGeneration = globalPinchGeneration;
 		}
 
-		if (this.reconnectGrabCooldown <= 0 && justPinched && this.grabbed == null && !this.isPickupAnimating){
+		// Exclusive pinch target resolution: panel > drawers > bins > ui > object.
+		let pinchTargetResolved = false;
+		if (this.reconnectGrabCooldown <= 0 && justPinched && this.grabbed == null && !this.isPickupAnimating) {
+			if (tryLockPanelOnPinchStart(this)) {
+				pinchTargetResolved = true;
+			} else if (tryStartDrawerGrabOnPinchStart(this)) {
+				pinchTargetResolved = true;
+			} else if (tryStartBinGrabOnPinchStart(this)) {
+				pinchTargetResolved = true;
+			} else if (tryTriggerUiHitboxOnPinchStart(this)) {
+				pinchTargetResolved = true;
+			}
+		}
+
+		if (!pinchTargetResolved && !anyPanelLocked() && this.reconnectGrabCooldown <= 0 && justPinched && this.grabbed == null && !this.isPickupAnimating){
             let currClosestD = w;
             let currClosest = null;
             for (let i=0; i<grabbables.length; i++){
@@ -817,7 +1628,7 @@ class oneHand {
 					continue;
 				}
                 let d = vdist(this.pinchPt,g.pt)
-                if (d<((this.grabReach+g.s) * GRAB_RANGE_SCALE / getWindowScaleFactor()) && d<=currClosestD){
+                if (d<(g.s * PINCH_TRIGGER_RANGE_SCALE / getWindowScaleFactor()) && d<=currClosestD){
                     currClosestD = d
                     currClosest = g
                 }
@@ -859,7 +1670,7 @@ class oneHand {
 			if (!g || g === this.grabbed || !g.active) {
 				continue;
 			}
-			const interactionRadius = g.s * TOOL_INTERACTION_RADIUS_FACTOR;
+			const interactionRadius = g.s * toolConfig.interactionRadiusFactor;
 			if (vdist(tip, g.pt) <= interactionRadius) {
 				this.debugToolHits.push(g);
 			}
@@ -871,6 +1682,11 @@ class oneHand {
 			this.lastHeldToolItemId = null;
 			this.prevToolTip = null;
 			this.toolTipSpeed = 0;
+			this.toolPreviewChunkSum = 0;
+			this.toolPreviewChunkCount = 0;
+			this.toolPreviewGoodChunks = 0;
+			this.toolPreviewBadChunks = 0;
+			this.toolPreviewActive = false;
 			return;
 		}
 		const tip = getHeldToolTipPoint(heldTool, this.handSide);
@@ -884,6 +1700,24 @@ class oneHand {
 		const toolItemId = heldTool.modelItemId || null;
 		const justPickedUpTool = this.lastHeldToolItemId !== toolItemId;
 		this.lastHeldToolItemId = toolItemId;
+		const chunkFrames = max(1, int(toolConfig.toolVelocityChunkFrames || 4));
+		const requiredChunks = max(1, int(toolConfig.toolSustainChunksRequired || 3));
+		const scalpelMin = scaleSpeedForWindow(toolConfig.cutScalpelMinSpeed);
+		const scalpelMax = scaleSpeedForWindow(toolConfig.cutScalpelMaxSpeed);
+		const bonesawMin = scaleSpeedForWindow(toolConfig.cutBonesawMinSpeed);
+		const hammerMin = scaleSpeedForWindow(toolConfig.cutHammerMinSpeed);
+		const isSpeedMatch = (speedVal) => {
+			if (toolItemId === "tool_scalpel") {
+				return speedVal >= scalpelMin && speedVal <= scalpelMax;
+			}
+			if (toolItemId === "tool_bonesaw") {
+				return speedVal > bonesawMin;
+			}
+			if (toolItemId === "tool_hammer") {
+				return speedVal > hammerMin;
+			}
+			return false;
+		};
 		if (justPickedUpTool && typeof DEBUG_MODE !== "undefined" && DEBUG_MODE) {
 			print("[TOOL_PICKED_UP]", {
 				toolItemId: toolItemId,
@@ -897,21 +1731,29 @@ class oneHand {
 			}
 			let state = this.cutGestureByHitboxId.get(hbId);
 			if (!state) {
-				state = { armed: false, peak: 0, cooldown: 0, debugArmed: false, debugPeak: 0, highSpeedFrames: 0, debugHighSpeedFrames: 0 };
+				state = {
+					armed: false, peak: 0, cooldown: 0, debugArmed: false, debugPeak: 0,
+					chunkSum: 0, chunkCount: 0, goodChunks: 0,
+					debugChunkSum: 0, debugChunkCount: 0, debugGoodChunks: 0
+				};
 				this.cutGestureByHitboxId.set(hbId, state);
 			}
 			if (state.cooldown > 0) {
 				state.cooldown--;
 				continue;
 			}
-			const inZone = vdist(tip, zoneG.pt) <= (zoneG.s * TOOL_INTERACTION_RADIUS_FACTOR);
+			const inZone = vdist(tip, zoneG.pt) <= (zoneG.s * toolConfig.interactionRadiusFactor);
 			if (!inZone) {
 				state.armed = false;
 				state.peak = 0;
-				state.highSpeedFrames = 0;
+				state.chunkSum = 0;
+				state.chunkCount = 0;
+				state.goodChunks = 0;
 				state.debugArmed = false;
 				state.debugPeak = 0;
-				state.debugHighSpeedFrames = 0;
+				state.debugChunkSum = 0;
+				state.debugChunkCount = 0;
+				state.debugGoodChunks = 0;
 				continue;
 			}
 			if (justPickedUpTool && typeof DEBUG_MODE !== "undefined" && DEBUG_MODE) {
@@ -923,30 +1765,28 @@ class oneHand {
 					tipSpeed: this.toolTipSpeed
 				});
 			}
-			let requiredSustainFrames = CUT_SUSTAIN_FRAMES_SCALPEL;
-			if (toolItemId === "tool_bonesaw") {
-				requiredSustainFrames = CUT_SUSTAIN_FRAMES_BONESAW;
-			} else if (toolItemId === "tool_hammer") {
-				requiredSustainFrames = CUT_SUSTAIN_FRAMES_HAMMER;
+			if (hb.requiredTool && toolItemId !== hb.requiredTool) {
+				state.armed = false;
+				state.peak = 0;
+				state.chunkSum = 0;
+				state.chunkCount = 0;
+				state.goodChunks = 0;
+				continue;
 			}
-			const scalpelMin = scaleSpeedForWindow(CUT_SCALPEL_MIN_SPEED);
-			const scalpelMax = scaleSpeedForWindow(CUT_SCALPEL_MAX_SPEED);
-			const bonesawMin = scaleSpeedForWindow(CUT_BONESAW_MIN_SPEED);
-			const hammerMin = scaleSpeedForWindow(CUT_HAMMER_MIN_SPEED);
-			let speedMatch = false;
-			if (toolItemId === "tool_scalpel") {
-				speedMatch = this.toolTipSpeed >= scalpelMin && this.toolTipSpeed <= scalpelMax;
-			} else if (toolItemId === "tool_bonesaw") {
-				speedMatch = this.toolTipSpeed > bonesawMin;
-			} else if (toolItemId === "tool_hammer") {
-				speedMatch = this.toolTipSpeed > hammerMin;
+			state.debugChunkSum += this.toolTipSpeed;
+			state.debugChunkCount++;
+			if (state.debugChunkCount >= chunkFrames) {
+				const debugAvg = state.debugChunkSum / state.debugChunkCount;
+				const debugChunkMatch = isSpeedMatch(debugAvg);
+				if (debugChunkMatch) {
+					state.debugGoodChunks++;
+				} else {
+					state.debugGoodChunks = 0;
+				}
+				state.debugChunkSum = 0;
+				state.debugChunkCount = 0;
 			}
-			if (speedMatch) {
-				state.debugHighSpeedFrames++;
-			} else {
-				state.debugHighSpeedFrames = 0;
-			}
-			if (state.debugHighSpeedFrames >= requiredSustainFrames) {
+			if (state.debugGoodChunks >= requiredChunks) {
 				if (typeof DEBUG_MODE !== "undefined" && DEBUG_MODE) {
 					print("[TOOL_ACTION_TRIGGER_TEST]", {
 						toolItemId: toolItemId,
@@ -956,17 +1796,25 @@ class oneHand {
 						tipSpeed: this.toolTipSpeed
 					});
 				}
-				state.debugHighSpeedFrames = 0;
+				state.debugGoodChunks = 0;
 			}
 			if (hb.interactionMode !== "cut_gesture") {
 				continue;
 			}
-			if (speedMatch) {
-				state.highSpeedFrames++;
-			} else {
-				state.highSpeedFrames = 0;
+			state.chunkSum += this.toolTipSpeed;
+			state.chunkCount++;
+			if (state.chunkCount >= chunkFrames) {
+				const avgSpeed = state.chunkSum / state.chunkCount;
+				const chunkMatch = isSpeedMatch(avgSpeed);
+				if (chunkMatch) {
+					state.goodChunks++;
+				} else {
+					state.goodChunks = 0;
+				}
+				state.chunkSum = 0;
+				state.chunkCount = 0;
 			}
-			if (state.highSpeedFrames >= requiredSustainFrames) {
+			if (state.goodChunks >= requiredChunks) {
 				if (typeof DEBUG_MODE !== "undefined" && DEBUG_MODE) {
 					print("[TOOL_ACTION_TRIGGER]", {
 						toolItemId: toolItemId,
@@ -978,9 +1826,32 @@ class oneHand {
 				applyHitboxDeclarativeRules(zoneG);
 				zoneG.hasBeenGrabbed = true;
 				markModelItemInteracted(zoneG.modelItemId);
-				state.highSpeedFrames = 0;
-				state.cooldown = hb.cutCooldownFrames || CUT_COOLDOWN_FRAMES;
+				state.goodChunks = 0;
+				state.cooldown = hb.cutCooldownFrames || toolConfig.cutCooldownFrames;
 			}
+		}
+		this.toolPreviewChunkSum += this.toolTipSpeed;
+		this.toolPreviewChunkCount++;
+		if (this.toolPreviewChunkCount >= chunkFrames) {
+			const previewAvg = this.toolPreviewChunkSum / this.toolPreviewChunkCount;
+			const previewChunkMatch = isSpeedMatch(previewAvg);
+			if (previewChunkMatch) {
+				this.toolPreviewGoodChunks++;
+				this.toolPreviewBadChunks = 0;
+			} else {
+				this.toolPreviewBadChunks++;
+				const offChunks = max(1, ceil(requiredChunks * 0.5));
+				if (this.toolPreviewBadChunks >= offChunks) {
+					this.toolPreviewGoodChunks = 0;
+					this.toolPreviewBadChunks = 0;
+					this.toolPreviewActive = false;
+				}
+			}
+			this.toolPreviewChunkSum = 0;
+			this.toolPreviewChunkCount = 0;
+		}
+		if (this.toolPreviewGoodChunks >= requiredChunks) {
+			this.toolPreviewActive = true;
 		}
 	}
 	checkzig() {
@@ -1019,6 +1890,7 @@ class grabbable {
 		this.color = color(s*2,s*2,255)
 		this.visible = v;
 		this.isGrabbed = false;
+		this.hasEverBeenPickedUp = false;
 		this.hasBeenGrabbed = false;
 		this.itemID = ID;
 		this.pic = pic;
@@ -1034,6 +1906,15 @@ class grabbable {
 		this.grabRotation = random(-10, 10);
 		this.dropSpinVelocity = 0;
 		this.wasGrabbedLastFrame = false;
+		this.pendingDrawerDock = false;
+		this.returningToDrawer = false;
+		this.returnDrawerIdx = -1;
+		this.binConsumeActive = false;
+		this.binConsumeFrame = 0;
+		this.binConsumeStartPt = null;
+		this.binConsumeTargetPt = null;
+		this.binConsumeStartScale = 1;
+		this.binConsumeStartRot = 0;
 		this.bounceFramesLeft = 0;
 		this.bounceSpinPerFrame = 0;
 		this.pendingDropSpin = 0;
@@ -1122,30 +2003,6 @@ class grabbable {
 			this.endBounceVelocity.mult(0.55);
 			this.endBounceAngularVelocity *= 0.55;
 		}
-        // print("dropped")
-        if (this.pt.x<400 && (200 < this.pt.y && this.pt.y < 500)){
-						if (lithiumIsOpen)
-						{toss(this)}
-						if(this.itemID%2==0)
-							{
-								
-							}
-					else{
-						
-					}
-            // let index = grabbables.indexOf(this);
-            // grabbables.splice(index, 1);
-        }
-        if (this.pt.x<400 && (600 < this.pt.y && this.pt.y < 900)){
-            if (alkalineIsOpen) {toss(this)}
-						if(this.itemID%2==1)
-							{
-								 
-							}
-						else{
-							
-						}
-        }
 	}
 ud(pt, handSide) {
 		if (!this.active) {
@@ -1154,16 +2011,27 @@ ud(pt, handSide) {
 		if (!this.isGrabbed) {
 			if (isToolItem(this.itemID)) {
 				// Tools settle to handed hold orientation.
-				this.grabRotation = getToolAngleForSide(handSide);
+				const handObj = getHandBySide(handSide || this.grabbedByHandSide);
+				const previewT = handObj ? handObj.toolPreviewT : 0;
+				this.grabRotation = getToolAngleForSide(handSide) + getToolPreviewAngleOffsetForSide(handSide, previewT);
 			} else {
 				this.grabRotation = this.currentRotation + random(-10, 10);
 			}
 			this.pickupOrder = ++grabRenderCounter;
 		}
 		if (isToolItem(this.itemID)) {
-			this.grabRotation = getToolAngleForSide(handSide);
+			const handObj = getHandBySide(handSide || this.grabbedByHandSide);
+			const previewT = handObj ? handObj.toolPreviewT : 0;
+			this.grabRotation = getToolAngleForSide(handSide) + getToolPreviewAngleOffsetForSide(handSide, previewT);
+			this.grabScale = lerp(1.1, toolConfig.toolPreviewToolScale, previewT);
 		}
 		this.isGrabbed = true;
+		this.pendingDrawerDock = false;
+		this.returningToDrawer = false;
+		this.returnDrawerIdx = -1;
+		if (isToolItem(this.itemID)) {
+			this.hasEverBeenPickedUp = true;
+		}
 		if (handSide) {
 			this.grabbedByHandSide = handSide;
 		}
@@ -1225,6 +2093,23 @@ ud(pt, handSide) {
 	}
 	
 	display() {
+		if (this.binConsumeActive) {
+			if (this.visible && (this.pic != null)) {
+				push();
+				translate(this.pt.x, this.pt.y);
+				push();
+				rotate(this.currentRotation);
+				scale(this.currentScale);
+				if (isToolItem(this.itemID) && this.grabbedByHandSide === "left") {
+					scale(-1, 1);
+				}
+				image(this.pic, 0, 0);
+				pop();
+				pop();
+			}
+			this.wasGrabbedLastFrame = this.isGrabbed;
+			return;
+		}
 		if (!this.isThrown && !this.wasGrabbedLastFrame && this.isGrabbed) {
 			// Pickup bounce: tiny opposite pre-rotation before settling toward grabRotation.
 			const dir = this.grabRotation === 0 ? 1 : Math.sign(this.grabRotation);
@@ -1294,12 +2179,47 @@ function untoss(g)
 	//g.visible = true;
 }
 
+function applyUiInteractionConfig() {
+	if (!uiInteractionsData) return;
+	const cfg = uiInteractionsData;
+	uiConfig = {
+		...uiConfig,
+		...cfg,
+		panel: { ...uiConfig.panel, ...(cfg.panel || {}) },
+		drawer: { ...uiConfig.drawer, ...(cfg.drawer || {}) },
+		bins: { ...uiConfig.bins, ...(cfg.bins || {}) }
+	};
+	if (cfg.drawer && Array.isArray(cfg.drawer.hitboxes)) {
+		uiConfig.drawer.hitboxes = cfg.drawer.hitboxes;
+	}
+	if (cfg.bins && cfg.bins.top) {
+		uiConfig.bins.top = cfg.bins.top;
+	}
+	if (cfg.bins && cfg.bins.bottom) {
+		uiConfig.bins.bottom = cfg.bins.bottom;
+	}
+	if (!Array.isArray(uiConfig.uiHitboxes)) {
+		uiConfig.uiHitboxes = [];
+	}
+}
+
+function applyToolConfig() {
+	if (!toolConfigData) return;
+	toolConfig = {
+		...toolConfig,
+		...toolConfigData,
+		tools: toolConfigData.tools || toolConfig.tools || { items: [] }
+	};
+}
+
 function preloadWeg() {
   // Load the handpose model.
 	zig = [createVector(0,0),createVector(200,0),createVector(400,0),createVector(500,0),createVector(400,100),createVector(200,400),createVector(0,500),createVector(500,500)];
 	zstart = createVector(w/5,h/5);
   handpose = ml5.handpose(options);
 	bodyGrabbablesData = loadJSON("data/body-grabbables.json");
+	uiInteractionsData = loadJSON("data/ui-interactions.json");
+	toolConfigData = loadJSON("data/tool-config.json");
 }
 
 //SETUP
@@ -1316,7 +2236,9 @@ function setupWeg() {
   video.size(width, height);
   video.hide();
   // start detecting hands from the webcam video
-  handpose.detectStart(video, gotHands);
+	handpose.detectStart(video, gotHands);
+	applyUiInteractionConfig();
+	applyToolConfig();
 	// for (let i=0; i<10; i++){
 	// 	grabbables.push(new grabbable(width/2, i*height/10,30+(5*i)))
 	// }
@@ -1343,9 +2265,14 @@ function drawWeg() {
 	pop();
 
 	handTracker.ud();
+	updateDragPanelInteraction();
+	updateDrawerGrabInteractions();
+	updateBinGrabInteractions();
 	for (let i=0; i<grabbables.length; i++){
 		grabbables[i].drop();
+		maybeDockToolIntoDrawer(grabbables[i]);
 	}
+	updateBinIntake();
 	renderGrabbablesUnderClaws();
 	drawHands();
 	renderGrabbablesOverClaws();
@@ -1379,7 +2306,7 @@ function drawDebugInteractableHitboxes() {
 			if (!g || !isOnScreen(g.pt)) {
 				continue;
 			}
-			const interactionRadius = g.s * TOOL_INTERACTION_RADIUS_FACTOR;
+			const interactionRadius = g.s * toolConfig.interactionRadiusFactor;
 			if (vdist(handObj.debugToolTip, g.pt) <= interactionRadius) {
 				toolHotSet.add(i);
 			}
@@ -1401,27 +2328,27 @@ function drawDebugInteractableHitboxes() {
 		stroke(toolInside ? color(0, 255, 120, 230) : baseColor);
 		circle(g.pt.x, g.pt.y, g.s * 2);
 		stroke(toolInside ? color(255, 255, 0, 230) : color(255, 255, 255, 90));
-		circle(g.pt.x, g.pt.y, g.s * TOOL_INTERACTION_RADIUS_FACTOR * 2);
+		circle(g.pt.x, g.pt.y, g.s * toolConfig.interactionRadiusFactor * 2);
 	}
 
 	// Drop-zone interactables.
 	stroke(255, 220, 0, 190);
 	rectMode(CORNERS);
-	rect(0, 200, 400, 500);
-	rect(0, 600, 400, 900);
+	rect(uiConfig.bins.top.x1, uiConfig.bins.top.y1, uiConfig.bins.top.x2, uiConfig.bins.top.y2);
+	rect(uiConfig.bins.bottom.x1, uiConfig.bins.bottom.y1, uiConfig.bins.bottom.x2, uiConfig.bins.bottom.y2);
 
 	// Per-hand grab interaction radii (matches grab logic).
 	for (let hIdx = 0; hIdx < handTracker.hands.length; hIdx++) {
 		const handObj = handTracker.hands[hIdx];
 		const p = handObj.pinchPt;
-		const baseR = (handObj.grabReach * GRAB_RANGE_SCALE / getWindowScaleFactor());
+		const baseR = (handObj.grabReach / getWindowScaleFactor());
 		let anyInRange = false;
 		for (let i = 0; i < grabbables.length; i++) {
 			const g = grabbables[i];
 			if (!g || !isOnScreen(g.pt) || !g.active) {
 				continue;
 			}
-			const edgeToEdgeReach = baseR + (g.s * GRAB_RANGE_SCALE / getWindowScaleFactor());
+			const edgeToEdgeReach = baseR + (g.s / getWindowScaleFactor());
 			if (vdist(p, g.pt) <= edgeToEdgeReach) {
 				anyInRange = true;
 				break;
@@ -1462,7 +2389,7 @@ function renderGrabbablesOverClaws() {
 function drawHands(){
 	for (let i=0; i<handTracker.hands.length; i++){
 		let h = handTracker.hands[i]
-		let p = h.pinchPt;
+		let p = h.getRenderPinchPt();
 		const clawImg = h.pinching ? closedclaw : openclaw;
 		if (!clawImg) {
 			continue;
@@ -1535,7 +2462,7 @@ function drawHandDebugOverlay() {
 				noFill();
 				stroke(0, 255, 0);
 				strokeWeight(3);
-				circle(g.pt.x, g.pt.y, g.s * TOOL_INTERACTION_RADIUS_FACTOR * 2);
+				circle(g.pt.x, g.pt.y, g.s * toolConfig.interactionRadiusFactor * 2);
 				pop();
 			}
 		}
@@ -1546,8 +2473,51 @@ function drawAllDebugOverlays() {
 	if (typeof DEBUG_MODE === "undefined" || !DEBUG_MODE) {
 		return;
 	}
+	drawPanelDebugOverlay();
 	drawDebugInteractableHitboxes();
 	drawHandDebugOverlay();
+}
+
+function drawPanelDebugOverlay() {
+	const y1 = uiConfig.panel.y1 + dragPanel.offsetY;
+	const y2 = uiConfig.panel.y2 + dragPanel.offsetY;
+	push();
+	noFill();
+	stroke(80, 220, 255, 220);
+	strokeWeight(3);
+	rectMode(CORNERS);
+	rect(uiConfig.panel.x1, y1, uiConfig.panel.x2, y2);
+	stroke(255, 180, 0, 220);
+	line(uiConfig.panel.x1, uiConfig.panel.lockY + dragPanel.offsetY, uiConfig.panel.x2, uiConfig.panel.lockY + dragPanel.offsetY);
+	stroke(80, 180, 255, 160);
+	rect(uiConfig.drawer.hitboxes[0].x1, uiConfig.drawer.hitboxes[0].y1, uiConfig.drawer.hitboxes[0].x2, uiConfig.drawer.hitboxes[0].y2);
+	rect(uiConfig.drawer.hitboxes[1].x1, uiConfig.drawer.hitboxes[1].y1, uiConfig.drawer.hitboxes[1].x2, uiConfig.drawer.hitboxes[1].y2);
+	rect(uiConfig.drawer.hitboxes[2].x1, uiConfig.drawer.hitboxes[2].y1, uiConfig.drawer.hitboxes[2].x2, uiConfig.drawer.hitboxes[2].y2);
+	stroke(80, 180, 255, 120);
+	line(uiConfig.drawer.hitboxes[0].x1, uiConfig.drawer.hitboxes[0].lockY, uiConfig.drawer.hitboxes[0].x2, uiConfig.drawer.hitboxes[0].lockY);
+	line(uiConfig.drawer.hitboxes[1].x1, uiConfig.drawer.hitboxes[1].lockY, uiConfig.drawer.hitboxes[1].x2, uiConfig.drawer.hitboxes[1].lockY);
+	line(uiConfig.drawer.hitboxes[2].x1, uiConfig.drawer.hitboxes[2].lockY, uiConfig.drawer.hitboxes[2].x2, uiConfig.drawer.hitboxes[2].lockY);
+	stroke(255, 140, 40, 180);
+	strokeWeight(2);
+	for (let i = 0; i < uiConfig.uiHitboxes.length; i++) {
+		const hb = uiConfig.uiHitboxes[i];
+		rect(hb.x1, hb.y1, hb.x2, hb.y2);
+	}
+	stroke(255, 90, 90, 200);
+	if (!isBinOpen(0)) {
+		rect(uiConfig.bins.lockZoneX1, uiConfig.bins.top.y1, uiConfig.bins.lockZoneX2, uiConfig.bins.top.y2);
+	}
+	if (!isBinOpen(1)) {
+		rect(uiConfig.bins.lockZoneX1, uiConfig.bins.bottom.y1, uiConfig.bins.lockZoneX2, uiConfig.bins.bottom.y2);
+	}
+	stroke(255, 200, 120, 190);
+	if (!isBinOpen(0)) {
+		line(uiConfig.bins.lockX, uiConfig.bins.top.y1, uiConfig.bins.lockX, uiConfig.bins.top.y2);
+	}
+	if (!isBinOpen(1)) {
+		line(uiConfig.bins.lockX, uiConfig.bins.bottom.y1, uiConfig.bins.lockX, uiConfig.bins.bottom.y2);
+	}
+	pop();
 }
 
 
@@ -1573,13 +2543,24 @@ function getPicByKeyMap() {
 	};
 }
 
-function setupGrabbablesFromBodyDefs(bodyKey) {
+function getItemDefsForSection(bodyKey) {
+	if (bodyKey === "tools") {
+		const toolItems = toolConfigData?.tools?.items;
+		return Array.isArray(toolItems) ? toolItems : [];
+	}
 	if (!bodyGrabbablesData || !bodyGrabbablesData[bodyKey]) {
+		return [];
+	}
+	const section = bodyGrabbablesData[bodyKey];
+	return Array.isArray(section?.items) ? section.items : [];
+}
+
+function setupGrabbablesFromBodyDefs(bodyKey) {
+	const picByKey = getPicByKeyMap();
+	const items = getItemDefsForSection(bodyKey);
+	if (!items.length) {
 		return;
 	}
-	const picByKey = getPicByKeyMap();
-	const section = bodyGrabbablesData[bodyKey];
-	const items = Array.isArray(section?.items) ? section.items : [];
 	for (let i = 0; i < items.length; i++) {
 		const itemDef = items[i];
 		const hitboxes = Array.isArray(itemDef.hitboxes) ? itemDef.hitboxes : [];
@@ -1596,8 +2577,8 @@ function setupGrabbablesFromBodyDefs(bodyKey) {
 				g.movable = false;
 			}
 			if (isTool) {
-				g.currentRotation = TOOL_RIGHT_ANGLE;
-				g.grabRotation = TOOL_RIGHT_ANGLE;
+				g.currentRotation = toolConfig.rightToolAngle;
+				g.grabRotation = toolConfig.rightToolAngle;
 			}
 			grabbables.push(g);
 			const grabbableIndex = grabbables.length - 1;
@@ -1704,6 +2685,10 @@ function hasModelHitboxBeenGrabbed(hitboxId) {
 }
 
 function hasModelItemBeenInteracted(itemId) {
+	if (interactionModel && interactionModel.itemsById.has(itemId)) {
+		const item = interactionModel.itemsById.get(itemId);
+		return !!(item && item.flags && item.flags.hasBeenInteracted);
+	}
 	const hitboxes = getModelHitboxesForItem(itemId);
 	for (let i = 0; i < hitboxes.length; i++) {
 		const g = grabbables[hitboxes[i].grabbableIndex];
