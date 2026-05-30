@@ -4,18 +4,17 @@
   "interactionRadiusFactor": 1.0,
   "tipAxisOffsetDeg": -90,
   "cutCooldownFrames": 10,
-  "cutSustainFramesScalpel": 8,
-  "cutSustainFramesBonesaw": 8,
-  "cutSustainFramesHammer": 8,
   "cutScalpelMinSpeed": 4,
   "cutScalpelMaxSpeed": 10,
   "cutBonesawMinSpeed": 10,
   "cutHammerMinSpeed": 15,
   "toolPreviewAngleDeltaDeg": 15,
   "toolPreviewClawScale": 0.9,
-  "toolPreviewToolScale": 0.85,
-  "toolVelocityChunkFrames": 4,
-  "toolSustainChunksRequired": 3,
+  "toolPreviewToolScale": 0.9,
+  "toolPreviewStartChunks": 2,
+  "toolPreviewEndChunks": 1,
+  "toolVelocityChunkFrames": 6,
+  "toolSustainChunksRequired": 6,
   "tools": {
     "items": [
       {

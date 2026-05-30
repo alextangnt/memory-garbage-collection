@@ -74,9 +74,6 @@ const DEFAULT_TOOL_CONFIG = {
 	interactionRadiusFactor: 1.0,
 	tipAxisOffsetDeg: -90,
 	cutCooldownFrames: 10,
-	cutSustainFramesScalpel: 5,
-	cutSustainFramesBonesaw: 8,
-	cutSustainFramesHammer: 8,
 	cutScalpelMinSpeed: 4,
 	cutScalpelMaxSpeed: 10,
 	cutBonesawMinSpeed: 10,
@@ -84,6 +81,8 @@ const DEFAULT_TOOL_CONFIG = {
 	toolPreviewAngleDeltaDeg: 5,
 	toolPreviewClawScale: 0.9,
 	toolPreviewToolScale: 0.9,
+	toolPreviewStartChunks: 1,
+	toolPreviewEndChunks: 2,
 	toolVelocityChunkFrames: 4,
 	toolSustainChunksRequired: 3,
 	tools: { items: [] }
@@ -109,7 +108,7 @@ const DEFAULT_UI_CONFIG = {
 let toolConfig = JSON.parse(JSON.stringify(DEFAULT_TOOL_CONFIG));
 let uiConfig = JSON.parse(JSON.stringify(DEFAULT_UI_CONFIG));
 const CLAW_FEEDBACK_JITTER_FRAMES = 8;
-const CLAW_FEEDBACK_JITTER_MAG = 10;
+const CLAW_FEEDBACK_JITTER_MAG = 15;
 const CLAW_FEEDBACK_LAUNCH_FRAMES = 11;
 const CLAW_FEEDBACK_LAUNCH_SCALE = 1.32;
 const PANEL_FAIL_JITTER_SPEED = 2.4;
@@ -543,6 +542,32 @@ function tryTriggerUiHitboxOnPinchStart(handObj) {
 		return true;
 	}
 	return false;
+}
+
+function tryAnimateToolRequiredHitboxFeedback(handObj) {
+	if (!handObj || !handObj.pinchPt) return false;
+	let nearestDist = Infinity;
+	let targetZone = null;
+	for (let i = 0; i < grabbables.length; i++) {
+		const g = grabbables[i];
+		if (!g || !g.active) continue;
+		const hb = (interactionModel && g.modelHitboxId) ? interactionModel.hitboxesById.get(g.modelHitboxId) : null;
+		if (!hb || !hb.requiredTool) continue;
+		const d = vdist(handObj.pinchPt, g.pt);
+		if (d <= (g.s * PINCH_TRIGGER_RANGE_SCALE / getWindowScaleFactor()) && d < nearestDist) {
+			nearestDist = d;
+			targetZone = g;
+		}
+	}
+	if (!targetZone) return false;
+	// First mimic a successful grab approach animation (move to hitbox center + shrink),
+	// then reject with jitter feedback because the zone requires a tool.
+	handObj.startUiLockAnimation(targetZone.pt.copy(), () => {
+		handObj.toolRequiredFeedbackLockPt = targetZone.pt.copy();
+		handObj.toolRequiredFeedbackPendingUnlock = true;
+		handObj.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG);
+	});
+	return true;
 }
 
 function triggerUiHandler(hitboxDef, handObj) {
@@ -1229,6 +1254,8 @@ class oneHand {
 		this.toolPreviewBadChunks = 0;
 		this.toolPreviewActive = false;
 		this.toolPreviewT = 0;
+		this.toolRequiredFeedbackLockPt = null;
+		this.toolRequiredFeedbackPendingUnlock = false;
 		this.updateFromDetection(hand);
 	}
 	
@@ -1262,6 +1289,8 @@ class oneHand {
 		this.feedbackLaunchVel.set(0, 0);
 		this.feedbackLaunchOffset.set(0, 0);
 		this.renderPinchOffset.set(0, 0);
+		this.toolRequiredFeedbackLockPt = null;
+		this.toolRequiredFeedbackPendingUnlock = false;
 	}
 	startClawJitter(frames = CLAW_FEEDBACK_JITTER_FRAMES, mag = CLAW_FEEDBACK_JITTER_MAG) {
 		if (this.feedbackMode === "launch") return;
@@ -1296,6 +1325,11 @@ class oneHand {
 			if (this.feedbackFrame >= this.feedbackTotalFrames) {
 				this.feedbackMode = null;
 				this.renderPinchOffset.set(0, 0);
+				if (this.toolRequiredFeedbackPendingUnlock) {
+					this.toolRequiredFeedbackPendingUnlock = false;
+					this.toolRequiredFeedbackLockPt = null;
+					this.isUiUnlockReturning = true;
+				}
 			}
 			return false;
 		}
@@ -1587,10 +1621,10 @@ class oneHand {
 			return;
 		}
 		const previewTarget = this.toolPreviewActive ? 1 : 0;
-		this.toolPreviewT = lerp(this.toolPreviewT, previewTarget, 0.35);
+		this.toolPreviewT = lerp(this.toolPreviewT, previewTarget, 0.7);
 		if (this.grabbed && isToolItem(this.grabbed.itemID)) {
 			const previewScaleTarget = lerp(1, toolConfig.toolPreviewClawScale, this.toolPreviewT);
-			this.clawScale = lerp(this.clawScale, previewScaleTarget, 0.35);
+			this.clawScale = lerp(this.clawScale, previewScaleTarget, 0.7);
 		}
 		const justPinched = (!wasPinching && this.pinching);
 		if (justPinched) {
@@ -1613,29 +1647,35 @@ class oneHand {
 		}
 
 		if (!pinchTargetResolved && !anyPanelLocked() && this.reconnectGrabCooldown <= 0 && justPinched && this.grabbed == null && !this.isPickupAnimating){
-            let currClosestD = w;
-            let currClosest = null;
-            for (let i=0; i<grabbables.length; i++){
-                let g = grabbables[i]
-				if (!g.active) {
-					continue;
-				}
-				const hb = (interactionModel && g.modelHitboxId) ? interactionModel.hitboxesById.get(g.modelHitboxId) : null;
-				if (hb && hb.mode && hb.mode !== "grab") {
-					continue;
-				}
-				if (g.minPinchGeneration > this.currentPinchGeneration) {
-					continue;
-				}
-                let d = vdist(this.pinchPt,g.pt)
-                if (d<(g.s * PINCH_TRIGGER_RANGE_SCALE / getWindowScaleFactor()) && d<=currClosestD){
-                    currClosestD = d
-                    currClosest = g
-                }
-            }
-            if (currClosest != null) {
-                this.startPickupAnimation(currClosest);
-            }
+			// Feedback when pinching directly on zones that require a tool.
+			if (tryAnimateToolRequiredHitboxFeedback(this)) {
+				pinchTargetResolved = true;
+			}
+			if (!pinchTargetResolved) {
+            	let currClosestD = w;
+            	let currClosest = null;
+            	for (let i=0; i<grabbables.length; i++){
+                	let g = grabbables[i]
+					if (!g.active) {
+						continue;
+					}
+					const hb = (interactionModel && g.modelHitboxId) ? interactionModel.hitboxesById.get(g.modelHitboxId) : null;
+					if (hb && hb.mode && hb.mode !== "grab") {
+						continue;
+					}
+					if (g.minPinchGeneration > this.currentPinchGeneration) {
+						continue;
+					}
+                	let d = vdist(this.pinchPt,g.pt)
+                	if (d<(g.s * PINCH_TRIGGER_RANGE_SCALE / getWindowScaleFactor()) && d<=currClosestD){
+                    	currClosestD = d
+                    	currClosest = g
+                	}
+            	}
+            	if (currClosest != null) {
+                	this.startPickupAnimation(currClosest);
+            	}
+			}
         }
 
 		if (this.updatePickupAnimation()) {
@@ -1840,7 +1880,7 @@ class oneHand {
 				this.toolPreviewBadChunks = 0;
 			} else {
 				this.toolPreviewBadChunks++;
-				const offChunks = max(1, ceil(requiredChunks * 0.5));
+				const offChunks = max(1, int(toolConfig.toolPreviewEndChunks || ceil(requiredChunks * 0.5)));
 				if (this.toolPreviewBadChunks >= offChunks) {
 					this.toolPreviewGoodChunks = 0;
 					this.toolPreviewBadChunks = 0;
@@ -1850,7 +1890,8 @@ class oneHand {
 			this.toolPreviewChunkSum = 0;
 			this.toolPreviewChunkCount = 0;
 		}
-		if (this.toolPreviewGoodChunks >= requiredChunks) {
+		const previewStartChunks = max(1, int(toolConfig.toolPreviewStartChunks || 1));
+		if (this.toolPreviewGoodChunks >= previewStartChunks) {
 			this.toolPreviewActive = true;
 		}
 	}
