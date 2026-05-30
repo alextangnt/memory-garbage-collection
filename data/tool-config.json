@@ -14,7 +14,7 @@
   "toolPreviewStartChunks": 2,
   "toolPreviewEndChunks": 1,
   "toolVelocityChunkFrames": 6,
-  "toolSustainChunksRequired": 6,
+  "toolSustainChunksRequired": 4,
   "tools": {
     "items": [
       {

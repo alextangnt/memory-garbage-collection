@@ -55,8 +55,8 @@ const HAND_STALE_MS = 120;
 const RECONNECT_GRAB_COOLDOWN_FRAMES = 8;
 const PINCH_TRIGGER_RANGE_SCALE = 0.7;
 const THROW_DECEL = 0.72;
-const THROW_SMALL_THRESHOLD = 12.2;
-const THROW_BIG_THRESHOLD = 30.2;
+const THROW_SMALL_THRESHOLD = 30.2;
+const THROW_BIG_THRESHOLD = 40.2;
 const THROW_SMALL_SPEED = 50.0;
 const THROW_BIG_SPEED = 140.0;
 const THROW_SPIN_DAMP = 0.75;
@@ -68,6 +68,18 @@ const PICKUP_ATTACH_DIST = 10;
 const PICKUP_RETURN_DIST = 12;
 const CLAW_PICKUP_SHRINK_SCALE = 0.82;
 const CLAW_SCALE_LERP = 0.3;
+const HAND_DISTANCE_PALM_NEAR = 350;
+const HAND_DISTANCE_PALM_FAR = 300;
+const HAND_DISTANCE_CLAW_MIN_SCALE = 1.0;
+const HAND_DISTANCE_CLAW_MAX_SCALE = 3;
+const HAND_DISTANCE_ITEM_MIN_SCALE = 1.0;
+const HAND_DISTANCE_ITEM_MAX_SCALE = 3;
+const HAND_DISTANCE_SMOOTH = 0.28;
+const HAND_DISTANCE_GRAB_MAX_T = 0.72; // 0=near, 1=far. Above this, object pickup is blocked.
+const CLOSEUP_BIN_LABEL_OFFSET_X = 100;
+const CLOSEUP_BIN_LABEL_OFFSET_Y = -26;
+const CLOSEUP_LABEL_GLITCH_JITTER = 3.2;
+const CLOSEUP_LABEL_GLITCH_CHROMA = 2.4;
 const DEFAULT_TOOL_CONFIG = {
 	rightToolAngle: -45,
 	leftToolAngle: 45,
@@ -100,7 +112,7 @@ const DEFAULT_UI_CONFIG = {
 		]
 	},
 	bins: {
-		lockX: 300, lockZoneX1: 250, lockZoneX2: 400, openSpeedThreshold: 12, consumeFrames: 30,
+		lockX: 300, lockZoneX1: 250, lockZoneX2: 400, openSpeedThreshold: 12, pullLeftThreshold: 12, pullZThresholdT: 0.72, consumeFrames: 30,
 		top: { x1: 0, y1: 200, x2: 400, y2: 500, centerX: 200, centerY: 350 },
 		bottom: { x1: 0, y1: 600, x2: 400, y2: 900, centerX: 200, centerY: 750 }
 	}
@@ -145,8 +157,12 @@ let binGrabState = {
 	right: null
 };
 let binConsumeState = {
-	top: null,
-	bottom: null
+	top: [],
+	bottom: []
+};
+let binConsumeHadActive = {
+	top: false,
+	bottom: false
 };
 let panelJitterOffsetX = 0;
 let panelJitterOffsetY = 0;
@@ -157,6 +173,16 @@ let lidBottomJitterOffsetY = 0;
 let panelJitterState = { framesLeft: 0, mag: 0 };
 let lidJitterStateTop = { framesLeft: 0, mag: 0 };
 let lidJitterStateBottom = { framesLeft: 0, mag: 0 };
+let binSortStats = {
+	correctCount: 0,
+	incorrectCount: 0,
+	binnedItemIds: new Set(),
+	incorrectItemIds: new Set(),
+	notBinnedItemIds: new Set(),
+	statusByItemId: new Map(),
+	orderedEvents: []
+};
+let interactionLockActive = false;
 
 function triggerPanelJitter(mag = 4, frames = 8) {
 	panelJitterState.framesLeft = max(panelJitterState.framesLeft, frames);
@@ -222,6 +248,56 @@ function scaleDistanceForWindow(baseDistance) {
 function scaleSpeedForWindow(baseSpeed) {
 	return baseSpeed / getWindowScaleFactor();
 }
+function mapPalmScaleToDistanceT(palmScale) {
+	const near = max(HAND_DISTANCE_PALM_NEAR, HAND_DISTANCE_PALM_FAR + 1);
+	const far = min(HAND_DISTANCE_PALM_FAR, near - 1);
+	// Smaller palm scale means farther hand, which should increase on-screen claw/item scale.
+	return constrain(map(palmScale, near, far, 0, 1), 0, 1);
+}
+function mapPalmScaleToClawScale(palmScale) {
+	const t = mapPalmScaleToDistanceT(palmScale);
+	return lerp(HAND_DISTANCE_CLAW_MIN_SCALE, HAND_DISTANCE_CLAW_MAX_SCALE, t);
+}
+function mapPalmScaleToItemScale(palmScale) {
+	const t = mapPalmScaleToDistanceT(palmScale);
+	return lerp(HAND_DISTANCE_ITEM_MIN_SCALE, HAND_DISTANCE_ITEM_MAX_SCALE, t);
+}
+function canGrabObjectsAtPalmScale(palmScale) {
+	return mapPalmScaleToDistanceT(palmScale) <= HAND_DISTANCE_GRAB_MAX_T;
+}
+function isInteractionLocked() {
+	return interactionLockActive;
+}
+function setInteractionLockActive(v) {
+	interactionLockActive = !!v;
+	if (!interactionLockActive) return;
+	if (handTracker && Array.isArray(handTracker.hands)) {
+		for (let i = 0; i < handTracker.hands.length; i++) {
+			const h = handTracker.hands[i];
+			if (!h) continue;
+			h.releaseGrab(false, false, true);
+			clearUiLocksForHand(h);
+		}
+	}
+	dragPanel.leftMagnet = false;
+	dragPanel.rightMagnet = false;
+	dragPanel.engaged = false;
+	drawerGrabState.left = null;
+	drawerGrabState.right = null;
+	binGrabState.left = null;
+	binGrabState.right = null;
+}
+function isHandFarForLayer(handObj) {
+	if (!handObj) return false;
+	return mapPalmScaleToDistanceT(handObj.palmScaleSmoothed) > HAND_DISTANCE_GRAB_MAX_T;
+}
+function isCloseupViewActive() {
+	if (!handTracker || !Array.isArray(handTracker.hands)) return false;
+	for (let i = 0; i < handTracker.hands.length; i++) {
+		if (isHandFarForLayer(handTracker.hands[i])) return true;
+	}
+	return false;
+}
 function getHomePinch(side){
 	const cx = w / 2;
 	const cy = h / 2;
@@ -265,21 +341,37 @@ function createInteractionModel() {
 		bodyItemIds: new Map(),
 		bodyHitboxIds: new Map(),
 		rulesByItemId: new Map(),
-		grabbableIndexByHitboxId: new Map()
+		grabbableIndexByHitboxId: new Map(),
+		binTrackEligibleItemIds: new Set()
 	};
 }
 
 function resetInteractionModel() {
 	interactionModel = createInteractionModel();
+	binSortStats.correctCount = 0;
+	binSortStats.incorrectCount = 0;
+	binSortStats.binnedItemIds = new Set();
+	binSortStats.incorrectItemIds = new Set();
+	binSortStats.notBinnedItemIds = new Set();
+	binSortStats.statusByItemId = new Map();
+	binSortStats.orderedEvents = [];
+	interactionLockActive = false;
 }
 
 function getOrCreateModelItem(bodyKey, itemId, def) {
 	if (!interactionModel.itemsById.has(itemId)) {
+		const itemIdLc = String(itemId || "").toLowerCase();
+		const hitboxes = Array.isArray(def?.hitboxes) ? def.hitboxes : [];
+		const hasAnyVisualHitbox = hitboxes.some(hb => !!(hb && (hb.picKey || def.picKey)));
+		const isFlap = itemIdLc.includes("flap");
+		const isScorable = !isFlap && hasAnyVisualHitbox;
 		interactionModel.itemsById.set(itemId, {
 			id: itemId,
 			bodyKey: bodyKey,
 			state: def.initialState || "default",
 			picKey: def.picKey || null,
+			binTag: def.binTag || "lithium",
+			isScorable,
 			flags: { hasBeenInteracted: false },
 			hitboxIds: [],
 			ruleIds: []
@@ -353,6 +445,121 @@ function registerModelHitbox(bodyKey, itemDef, hitboxDef, id, g, grabbableIndex)
 	g.modelItemId = itemId;
 	g.modelHitboxId = hitboxId;
 	g.isConsumed = false;
+	g.binTag = itemDef.binTag || "lithium";
+}
+
+function getBinTagForBinKey(binKey) {
+	// Upper bin is lithium, lower bin is alkaline.
+	return binKey === "top" ? "lithium" : "alkaline";
+}
+
+function markItemNotBinned(itemId) {
+	if (!itemId) return;
+	const item = interactionModel?.itemsById?.get(itemId);
+	if (!item || !item.isScorable) return;
+	if (binSortStats.binnedItemIds.has(itemId) || binSortStats.notBinnedItemIds.has(itemId)) return;
+	binSortStats.notBinnedItemIds.add(itemId);
+	binSortStats.statusByItemId.set(itemId, "not_binned");
+}
+
+function markItemBinnedOutcome(g, binKey) {
+	if (!g || !g.modelItemId) return;
+	const itemId = g.modelItemId;
+	const item = interactionModel?.itemsById?.get(itemId);
+	if (!item || !item.isScorable) return;
+	if (binSortStats.binnedItemIds.has(itemId)) return;
+	const expectedTag = (g.binTag || "lithium");
+	const actualTag = getBinTagForBinKey(binKey);
+	const isCorrect = expectedTag === actualTag;
+	binSortStats.binnedItemIds.add(itemId);
+	binSortStats.notBinnedItemIds.delete(itemId);
+	if (isCorrect) {
+		binSortStats.correctCount++;
+		binSortStats.statusByItemId.set(itemId, "correct");
+	} else {
+		binSortStats.incorrectCount++;
+		binSortStats.incorrectItemIds.add(itemId);
+		binSortStats.statusByItemId.set(itemId, "incorrect");
+	}
+	binSortStats.orderedEvents.push({
+		itemId,
+		bodyKey: item.bodyKey,
+		expectedTag,
+		placedTag: actualTag,
+		correct: isCorrect,
+		x: g.origX,
+		y: g.origY,
+		pic: g.pic || null,
+		rotation: g.currentRotation || 0,
+		scale: g.baseScale || 1
+	});
+}
+
+function drawCloseupBinTags() {
+	push();
+	textAlign(LEFT, CENTER);
+	textFont("Courier New", 10);
+	textSize(30);
+	noStroke();
+	for (let i = 0; i < grabbables.length; i++) {
+		const g = grabbables[i];
+		if (!g || !g.visible || !g.pic || !g.active || !g.isGrabbed) continue;
+		if (!g.modelItemId || !g.modelItemId.startsWith("b")) continue;
+		const ownerHand = getHandBySide(g.grabbedByHandSide);
+		if (!isHandFarForLayer(ownerHand)) continue;
+		const tag = g.binTag || "lithium";
+		const bx = g.pt.x + CLOSEUP_BIN_LABEL_OFFSET_X;
+		const by = g.pt.y + CLOSEUP_BIN_LABEL_OFFSET_Y;
+		const jx = random(-CLOSEUP_LABEL_GLITCH_JITTER, CLOSEUP_LABEL_GLITCH_JITTER);
+		const jy = random(-CLOSEUP_LABEL_GLITCH_JITTER, CLOSEUP_LABEL_GLITCH_JITTER);
+		const c = CLOSEUP_LABEL_GLITCH_CHROMA;
+		const x1 = g.pt.x;
+		const y1 = g.pt.y;
+		const x2 = bx;
+		const y2 = by;
+		strokeWeight(2);
+		stroke(255, 80, 80, 180);
+		line(x1 - c + jx * 0.7, y1 + jy * 0.7, x2 - c + jx * 0.7, y2 + jy * 0.7);
+		stroke(90, 255, 140, 180);
+		line(x1 + c + jx * 0.35, y1 - jy * 0.35, x2 + c + jx * 0.35, y2 - jy * 0.35);
+		stroke(120, 120, 255, 180);
+		line(x1 + jx, y1 + jy, x2 + jx, y2 + jy);
+		stroke(255, 220);
+		line(x1, y1, x2, y2);
+		noStroke();
+		fill(255, 80, 80, 220);
+		text(tag, bx - c + jx * 0.7, by + jy * 0.7);
+		fill(90, 255, 140, 220);
+		text(tag, bx + c + jx * 0.35, by - jy * 0.35);
+		fill(120, 120, 255, 220);
+		text(tag, bx + jx, by + jy);
+		fill(255, 245);
+		text(tag, bx, by);
+	}
+	pop();
+}
+
+function getBinSortSummary() {
+	let eligible = 0;
+	if (interactionModel?.itemsById) {
+		for (const [, item] of interactionModel.itemsById) {
+			if (item && item.isScorable && String(item.id || "").startsWith("b")) eligible++;
+		}
+	}
+	const correct = binSortStats.correctCount;
+	const incorrect = binSortStats.incorrectCount;
+	const explicitNotBinned = binSortStats.notBinnedItemIds.size;
+	const inferredNotBinned = max(0, eligible - (binSortStats.binnedItemIds?.size || 0) - explicitNotBinned);
+	return {
+		eligible,
+		correct,
+		incorrect,
+		notBinned: explicitNotBinned + inferredNotBinned,
+		binned: binSortStats.binnedItemIds?.size || 0
+	};
+}
+function getBinSortReplayEvents() {
+	return Array.isArray(binSortStats.orderedEvents) ? binSortStats.orderedEvents.slice() : [];
 }
 
 function getModelHitboxesForItem(itemId) {
@@ -563,6 +770,7 @@ function isPointNearRectForGrab(handObj, x1, y1, x2, y2) {
 }
 
 function tryLockPanelOnPinchStart(handObj) {
+	if (isInteractionLocked()) return false;
 	if (!handObj || !isPointNearPanelForGrab(handObj)) return false;
 	if (handObj.grabbed) {
 		handObj.releaseGrab(false, false, false);
@@ -585,6 +793,7 @@ function tryLockPanelOnPinchStart(handObj) {
 }
 
 function tryTriggerUiHitboxOnPinchStart(handObj) {
+	if (isInteractionLocked()) return false;
 	if (!handObj || anyPanelLocked()) return false;
 	for (let i = 0; i < uiConfig.uiHitboxes.length; i++) {
 		const hb = uiConfig.uiHitboxes[i];
@@ -701,6 +910,7 @@ function clearBinGrabForSide(side) {
 }
 
 function tryStartBinGrabOnPinchStart(handObj) {
+	if (isInteractionLocked()) return false;
 	if (!handObj || anyPanelLocked()) return false;
 	const key = handObj.handSide === "left" ? "left" : "right";
 	if (binGrabState[key]) return false;
@@ -712,16 +922,15 @@ function tryStartBinGrabOnPinchStart(handObj) {
 	// Bin lock/open handles are only active while the bin is closed.
 	if (isBinOpen(binIdx)) return false;
 	const lockY = handObj.pinchPt.y;
+	// Immediate nudge to reduce occasional left-hand lock miss while lock animation starts.
+	handObj.pinchPt.x = lerp(handObj.pinchPt.x, uiConfig.bins.lockX, 0.35);
 	handObj.startUiLockAnimation(createVector(uiConfig.bins.lockX, lockY), () => {
 		if (isBinOpen(binIdx)) return;
 		binGrabState[key] = {
 			binIndex: binIdx,
 			lockY,
-			lastTrackedPt: handObj.trackedPinchPt.copy(),
-			peakSpeed: 0,
-			lastSpeed: 0,
-			highWhilePinched: false,
-			highHoldJittered: false
+			startTrackedX: handObj.trackedPinchPt.x,
+			halfJittered: false
 		};
 	});
 	return true;
@@ -782,6 +991,20 @@ function forceClawControlToTracked(handObj) {
 	handObj.uiLockOnComplete = null;
 	handObj.isUiUnlockReturning = false;
 }
+function clearUiLocksForHand(handObj) {
+	if (!handObj) return;
+	if (handObj.handSide === "left") {
+		dragPanel.leftMagnet = false;
+		clearDrawerGrabForSide("left");
+		clearBinGrabForSide("left");
+	} else {
+		dragPanel.rightMagnet = false;
+		clearDrawerGrabForSide("right");
+		clearBinGrabForSide("right");
+	}
+	dragPanel.engaged = dragPanel.leftMagnet || dragPanel.rightMagnet;
+	forceClawControlToTracked(handObj);
+}
 
 function isHandUiLocked(handObj) {
 	if (!handObj) return false;
@@ -792,6 +1015,7 @@ function isHandUiLocked(handObj) {
 }
 
 function tryStartDrawerGrabOnPinchStart(handObj) {
+	if (isInteractionLocked()) return false;
 	if (!handObj || anyPanelLocked()) return false;
 	const sideKey = drawerStateKeyForSide(handObj.handSide);
 	if (drawerGrabState[sideKey]) return false;
@@ -821,6 +1045,7 @@ function tryStartDrawerGrabOnPinchStart(handObj) {
 }
 
 function updateDrawerGrabInteractions() {
+	if (isInteractionLocked()) return;
 	if (!handTracker || !Array.isArray(handTracker.hands)) return;
 	if (!getHandBySide("left")) clearDrawerGrabForSide("left");
 	if (!getHandBySide("right")) clearDrawerGrabForSide("right");
@@ -861,6 +1086,7 @@ function updateDrawerGrabInteractions() {
 }
 
 function updateBinGrabInteractions() {
+	if (isInteractionLocked()) return;
 	if (!handTracker || !Array.isArray(handTracker.hands)) return;
 	if (!getHandBySide("left")) clearBinGrabForSide("left");
 	if (!getHandBySide("right")) clearBinGrabForSide("right");
@@ -870,52 +1096,37 @@ function updateBinGrabInteractions() {
 		const key = h.handSide === "left" ? "left" : "right";
 		const st = binGrabState[key];
 		if (!st) continue;
-		const v = p5.Vector.sub(h.trackedPinchPt, st.lastTrackedPt);
-		const speed = v.mag();
-		const speedThreshold = scaleSpeedForWindow(uiConfig.bins.openSpeedThreshold);
-		st.lastSpeed = speed;
-		st.peakSpeed = max(st.peakSpeed, speed);
-		st.lastTrackedPt = h.trackedPinchPt.copy();
-			if (h.pinching && speed >= speedThreshold) {
-				st.highWhilePinched = true;
-				// High-speed while held but no release yet: show "not yet" feedback once.
-				if (!st.highHoldJittered) {
-					h.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG);
-					triggerBinLidJitter(st.binIndex);
-					st.highHoldJittered = true;
-				}
-			}
 		if (!h.pinching) {
-			// Mirror small-throw detection style: use sampled tracked velocity history.
-			let sampledSpeed = st.lastSpeed;
-			let sampledDir = v.copy();
-			if (h.velocityHistory && h.velocityHistory.length > 0) {
-				const oldestCount = min(THROW_TIER_OLDEST_SAMPLE_COUNT, h.velocityHistory.length);
-				let sumSpeed = 0;
-				let sumDir = createVector(0, 0);
-				for (let j = 0; j < oldestCount; j++) {
-					sumSpeed += h.velocityHistory[j].speed;
-					sumDir.add(h.velocityHistory[j].v);
-				}
-				sampledSpeed = sumSpeed / oldestCount;
-				sumDir.div(oldestCount);
-				sampledDir = sumDir;
-			}
-			const releasedAtHighSpeed = sampledSpeed >= speedThreshold;
-			if (releasedAtHighSpeed) {
-				triggerBinOpen(st.binIndex);
-				const launchVel = sampledDir.mag() > 0.001 ? sampledDir.copy() : p5.Vector.sub(h.trackedPinchPt, h.pinchPt);
-				h.startClawLaunch(launchVel, CLAW_FEEDBACK_LAUNCH_SCALE, CLAW_FEEDBACK_LAUNCH_FRAMES);
-				} else {
-					// Explicit release with insufficient speed is a failed interaction.
-					h.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG);
-					triggerBinLidJitter(st.binIndex);
-				}
+			// Releasing pinch simply unlocks without opening.
 			clearBinGrabForSide(h.handSide);
 			continue;
 		}
 		h.pinchPt.x = uiConfig.bins.lockX;
 		h.pinchPt.y = st.lockY;
+		// Drawer-like pull gesture: sufficient horizontal pull opens bin.
+		// Use displacement magnitude to stay robust under mirrored camera coordinate conventions.
+		const pullDxAbs = abs(st.startTrackedX - h.trackedPinchPt.x);
+		// Also allow opening based on z-distance (hand appears far from camera).
+		const zThresholdT = (uiConfig?.bins?.pullZThresholdT != null)
+			? uiConfig.bins.pullZThresholdT
+			: HAND_DISTANCE_GRAB_MAX_T;
+		const zDistanceT = mapPalmScaleToDistanceT(h.palmScaleSmoothed);
+		const zTriggered = zDistanceT >= zThresholdT;
+		const pullLeftThreshold = (uiConfig?.bins?.pullLeftThreshold != null)
+			? uiConfig.bins.pullLeftThreshold
+			: uiConfig.bins.openSpeedThreshold;
+		const openThreshold = scaleDistanceForWindow(pullLeftThreshold);
+		const halfThreshold = openThreshold * 0.5;
+		const pullMetric = pullDxAbs;
+		if (!st.halfJittered && pullMetric >= halfThreshold) {
+			triggerBinLidJitter(st.binIndex);
+			st.halfJittered = true;
+		}
+		if (pullMetric >= openThreshold || zTriggered) {
+			triggerBinOpen(st.binIndex);
+			h.startClawLaunch(createVector(-1, 0), CLAW_FEEDBACK_LAUNCH_SCALE, max(4, int(CLAW_FEEDBACK_LAUNCH_FRAMES * 0.55)));
+			clearBinGrabForSide(h.handSide);
+		}
 	}
 }
 
@@ -927,12 +1138,14 @@ function startBinConsume(binKey, g, cx, cy) {
 	g.binConsumeTargetPt = createVector(cx, cy);
 	g.binConsumeStartScale = g.currentScale;
 	g.binConsumeStartRot = g.currentRotation;
-	binConsumeState[binKey] = g;
+	if (!Array.isArray(binConsumeState[binKey])) {
+		binConsumeState[binKey] = [];
+	}
+	binConsumeState[binKey].push(g);
 }
 
-function stepBinConsume(binIdx, binKey) {
-	const g = binConsumeState[binKey];
-	if (!g) return;
+function stepBinConsume(g, binKey) {
+	if (!g) return true;
 	g.binConsumeFrame++;
 	const t = constrain(g.binConsumeFrame / uiConfig.bins.consumeFrames, 0, 1);
 	const eased = t * t * (3 - 2 * t);
@@ -940,14 +1153,14 @@ function stepBinConsume(binIdx, binKey) {
 	g.pt.y = lerp(g.binConsumeStartPt.y, g.binConsumeTargetPt.y, eased * 0.65);
 	g.currentScale = lerp(g.binConsumeStartScale, 0, t);
 	g.currentRotation = g.binConsumeStartRot + (t * 540);
-	if (t < 1) return;
+	if (t < 1) return false;
 	g.binConsumeActive = false;
 	g.binConsumeFrame = 0;
+	markItemBinnedOutcome(g, binKey);
 	toss(g);
 	g.active = false;
 	g.visible = false;
-	binConsumeState[binKey] = null;
-	triggerBinClose(binIdx);
+	return true;
 }
 
 function updateBinIntake() {
@@ -958,19 +1171,33 @@ function updateBinIntake() {
 	for (let b = 0; b < bins.length; b++) {
 		const entry = bins[b];
 		if (!isBinOpen(entry.idx)) {
-			binConsumeState[entry.key] = null;
+			binConsumeState[entry.key] = [];
+			binConsumeHadActive[entry.key] = false;
 			continue;
 		}
-		if (binConsumeState[entry.key]) {
-			stepBinConsume(entry.idx, entry.key);
-			continue;
+		if (!Array.isArray(binConsumeState[entry.key])) {
+			binConsumeState[entry.key] = [];
 		}
+		const activeList = binConsumeState[entry.key];
+		for (let i = activeList.length - 1; i >= 0; i--) {
+			if (stepBinConsume(activeList[i], entry.key)) {
+				activeList.splice(i, 1);
+			}
+		}
+		let startedAny = false;
 		for (let i = 0; i < grabbables.length; i++) {
 			const g = grabbables[i];
 			if (!g || g.isGrabbed || g.binConsumeActive || !g.visible) continue;
 			if (g.pt.x < entry.def.x1 || g.pt.x > entry.def.x2 || g.pt.y < entry.def.y1 || g.pt.y > entry.def.y2) continue;
 			startBinConsume(entry.key, g, entry.def.centerX, entry.def.centerY);
-			break;
+			startedAny = true;
+		}
+		if (startedAny || activeList.length > 0) {
+			binConsumeHadActive[entry.key] = true;
+		}
+		if (!startedAny && activeList.length === 0 && binConsumeHadActive[entry.key]) {
+			triggerBinClose(entry.idx);
+			binConsumeHadActive[entry.key] = false;
 		}
 	}
 }
@@ -1366,6 +1593,9 @@ class oneHand {
 		this.isUiUnlockReturning = false;
 		this.wasUiLockedLastFrame = false;
 		this.clawScale = 1;
+		this.distanceClawScale = 1;
+		this.distanceItemScale = 1;
+		this.palmScaleSmoothed = HAND_DISTANCE_PALM_NEAR;
 		this.renderPinchOffset = createVector(0, 0);
 		this.feedbackMode = null; // null | "jitter" | "launch"
 		this.feedbackFrame = 0;
@@ -1498,7 +1728,7 @@ class oneHand {
 		if (!this.isUiLockAnimating || !this.uiLockTargetPt) {
 			return false;
 		}
-		this.clawScale = lerp(this.clawScale, CLAW_PICKUP_SHRINK_SCALE, CLAW_SCALE_LERP);
+		this.clawScale = lerp(this.clawScale, CLAW_PICKUP_SHRINK_SCALE * this.distanceClawScale, CLAW_SCALE_LERP);
 		this.pinchPt = p5.Vector.lerp(this.pinchPt, this.uiLockTargetPt, PICKUP_TO_OBJECT_LERP);
 		if (vdist(this.pinchPt, this.uiLockTargetPt) <= scaleDistanceForWindow(PICKUP_ATTACH_DIST)) {
 			this.pinchPt = this.uiLockTargetPt.copy();
@@ -1519,7 +1749,7 @@ class oneHand {
 		}
 		if (this.pickupStage === 1) {
 			// Move claw toward object first; ignore live tracking in this phase.
-			this.clawScale = lerp(this.clawScale, CLAW_PICKUP_SHRINK_SCALE, CLAW_SCALE_LERP);
+			this.clawScale = lerp(this.clawScale, CLAW_PICKUP_SHRINK_SCALE * this.distanceClawScale, CLAW_SCALE_LERP);
 			this.pinchPt = p5.Vector.lerp(this.pinchPt, this.pickupTargetObj.pt, PICKUP_TO_OBJECT_LERP);
 			if (vdist(this.pinchPt, this.pickupTargetObj.pt) <= scaleDistanceForWindow(PICKUP_ATTACH_DIST)) {
 				this.grabbed = this.pickupTargetObj;
@@ -1529,7 +1759,7 @@ class oneHand {
 		}
 		if (this.pickupStage === 2) {
 			// After attach, interpolate claw back to tracked position.
-			this.clawScale = lerp(this.clawScale, 1, CLAW_SCALE_LERP);
+			this.clawScale = lerp(this.clawScale, this.distanceClawScale, CLAW_SCALE_LERP);
 			this.pinchPt = p5.Vector.lerp(this.pinchPt, this.trackedPinchPt, PICKUP_RETURN_LERP);
 			if (this.grabbed != null) {
 				this.grabbed.ud(this.getClawControlPt(), this.handSide);
@@ -1640,6 +1870,11 @@ class oneHand {
 
 		this.getAv();
 		const wrist = mapTrackedPoint(hand.keypoints[ML5HAND_WRIST].x, hand.keypoints[ML5HAND_WRIST].y);
+		const middleMcp = mapTrackedPoint(hand.keypoints[ML5HAND_MIDDLE_FINGER_MCP].x, hand.keypoints[ML5HAND_MIDDLE_FINGER_MCP].y);
+		const palmScaleNow = max(18, dist(wrist.x, wrist.y, middleMcp.x, middleMcp.y));
+		this.palmScaleSmoothed = lerp(this.palmScaleSmoothed, palmScaleNow, HAND_DISTANCE_SMOOTH);
+		this.distanceClawScale = mapPalmScaleToClawScale(this.palmScaleSmoothed);
+		this.distanceItemScale = mapPalmScaleToItemScale(this.palmScaleSmoothed);
 		this.av = p5.Vector.lerp(this.av, wrist, 0.3);
 		if (wasMissing) {
 			this.releaseGrab(true);
@@ -1712,6 +1947,11 @@ class oneHand {
 			this.mustOpenBeforeNextInteraction = false;
 		}
 		this.grabReach = s;
+		const canUiInteractNow = canGrabObjectsAtPalmScale(this.palmScaleSmoothed);
+		const binLockedForThisHand = this.handSide === "left" ? !!binGrabState.left : !!binGrabState.right;
+		if (!canUiInteractNow && isHandUiLocked(this) && !binLockedForThisHand) {
+			clearUiLocksForHand(this);
+		}
 		if (zigmode) this.checkzig()
 
 		if (!this.pinching && !this.mustOpenBeforeNextInteraction && pinchRatio < PINCH_CLOSE_RATIO) {
@@ -1740,7 +1980,7 @@ class oneHand {
 			this.reconnectGrabCooldown--;
 		}
 		if (!this.isPickupAnimating && !this.isUiLockAnimating && !uiLockedNow) {
-			this.clawScale = lerp(this.clawScale, 1, CLAW_SCALE_LERP);
+			this.clawScale = lerp(this.clawScale, this.distanceClawScale, CLAW_SCALE_LERP);
 		}
 		if (this.updateUiLockAnimation()) {
 			return;
@@ -1748,12 +1988,12 @@ class oneHand {
 		if (this.toolRequiredFeedbackPendingUnlock && this.toolRequiredFeedbackLockPt) {
 			this.pinchPt.x = this.toolRequiredFeedbackLockPt.x;
 			this.pinchPt.y = this.toolRequiredFeedbackLockPt.y;
-			this.clawScale = lerp(this.clawScale, CLAW_PICKUP_SHRINK_SCALE, CLAW_SCALE_LERP);
+			this.clawScale = lerp(this.clawScale, CLAW_PICKUP_SHRINK_SCALE * this.distanceClawScale, CLAW_SCALE_LERP);
 		}
 		const feedbackOwnsMotion = this.updateClawFeedbackAnimation();
 		if (this.isUiUnlockReturning) {
 			this.pinchPt = p5.Vector.lerp(this.pinchPt, this.trackedPinchPt, PICKUP_RETURN_LERP);
-			this.clawScale = lerp(this.clawScale, 1, CLAW_SCALE_LERP);
+			this.clawScale = lerp(this.clawScale, this.distanceClawScale, CLAW_SCALE_LERP);
 			if (vdist(this.pinchPt, this.trackedPinchPt) <= scaleDistanceForWindow(PICKUP_RETURN_DIST)) {
 				this.isUiUnlockReturning = false;
 			}
@@ -1765,29 +2005,31 @@ class oneHand {
 		this.toolPreviewT = lerp(this.toolPreviewT, previewTarget, 0.7);
 		if (this.grabbed && isToolItem(this.grabbed.itemID)) {
 			const previewScaleTarget = lerp(1, toolConfig.toolPreviewClawScale, this.toolPreviewT);
-			this.clawScale = lerp(this.clawScale, previewScaleTarget, 0.7);
+			this.clawScale = lerp(this.clawScale, previewScaleTarget * this.distanceClawScale, 0.7);
 		}
 		const justPinched = (!wasPinching && this.pinching);
 		if (justPinched) {
 			globalPinchGeneration++;
 			this.currentPinchGeneration = globalPinchGeneration;
 		}
+		if (isInteractionLocked()) {
+			return;
+		}
 
 		// Exclusive pinch target resolution: panel > drawers > bins > ui > object.
 		let pinchTargetResolved = false;
-		if (this.reconnectGrabCooldown <= 0 && justPinched && this.grabbed == null && !this.isPickupAnimating) {
+		if (canUiInteractNow && this.reconnectGrabCooldown <= 0 && justPinched && this.grabbed == null && !this.isPickupAnimating) {
 			if (tryLockPanelOnPinchStart(this)) {
 				pinchTargetResolved = true;
 			} else if (tryStartDrawerGrabOnPinchStart(this)) {
-				pinchTargetResolved = true;
-			} else if (tryStartBinGrabOnPinchStart(this)) {
 				pinchTargetResolved = true;
 			} else if (tryTriggerUiHitboxOnPinchStart(this)) {
 				pinchTargetResolved = true;
 			}
 		}
 
-		if (!pinchTargetResolved && !anyPanelLocked() && this.reconnectGrabCooldown <= 0 && justPinched && this.grabbed == null && !this.isPickupAnimating){
+		const canGrabObjectsNow = canGrabObjectsAtPalmScale(this.palmScaleSmoothed);
+		if (!pinchTargetResolved && !anyPanelLocked() && canGrabObjectsNow && this.reconnectGrabCooldown <= 0 && justPinched && this.grabbed == null && !this.isPickupAnimating){
 			let currClosestD = w;
 			let currClosest = null;
 			for (let i=0; i<grabbables.length; i++){
@@ -1816,6 +2058,12 @@ class oneHand {
 				pinchTargetResolved = true;
 			}
         }
+		// Bins resolve after object pickup attempt so nearby objects are prioritized.
+		if (!pinchTargetResolved && canUiInteractNow && this.reconnectGrabCooldown <= 0 && justPinched && this.grabbed == null && !this.isPickupAnimating) {
+			if (tryStartBinGrabOnPinchStart(this)) {
+				pinchTargetResolved = true;
+			}
+		}
 
 		if (this.updatePickupAnimation()) {
 			return;
@@ -2082,6 +2330,7 @@ class grabbable {
 		this.baseScale = 1;
 		this.currentScale = 1;
 		this.grabScale = 1.1;
+		this.distanceGrabScale = 1;
 		this.currentRotation = 0;
 		this.grabRotation = random(-10, 10);
 		this.dropSpinVelocity = 0;
@@ -2184,7 +2433,7 @@ class grabbable {
 			this.endBounceAngularVelocity *= 0.55;
 		}
 	}
-ud(pt, handSide) {
+	ud(pt, handSide) {
 		if (!this.active) {
 			return;
 		}
@@ -2205,6 +2454,8 @@ ud(pt, handSide) {
 			this.grabRotation = getToolAngleForSide(handSide) + getToolPreviewAngleOffsetForSide(handSide, previewT);
 			this.grabScale = lerp(1.1, toolConfig.toolPreviewToolScale, previewT);
 		}
+		const handObjForScale = getHandBySide(handSide || this.grabbedByHandSide);
+		this.distanceGrabScale = handObjForScale ? handObjForScale.distanceItemScale : 1;
 		this.isGrabbed = true;
 		this.pendingDrawerDock = false;
 		this.returningToDrawer = false;
@@ -2305,7 +2556,7 @@ ud(pt, handSide) {
 		}
 		this.wasGrabbedLastFrame = this.isGrabbed;
 
-		const targetScale = this.isGrabbed ? this.grabScale : this.baseScale;
+		const targetScale = this.isGrabbed ? (this.grabScale * this.distanceGrabScale) : this.baseScale;
 		const targetRot = this.isGrabbed ? this.grabRotation : this.currentRotation;
 		this.currentScale = lerp(this.currentScale, targetScale, 0.29);
 		this.currentRotation = lerp(this.currentRotation, targetRot, 0.24);
@@ -2455,9 +2706,16 @@ function drawWeg() {
 	}
 	updateBinIntake();
 	renderGrabbablesUnderClaws();
-	drawHands();
-	renderGrabbablesOverClaws();
+	drawHands(false);
+	renderGrabbablesOverClaws(false);
 	drawPanelClipDifferenceOverlay();
+	if (typeof panelOverlay !== "undefined" && panelOverlay) {
+		// Keep panel above clipped xray/difference content but below far-layer claws/items.
+		image(panelOverlay, wc + (panelJitterOffsetX || 0), hc + (dragPanel?.offsetY || 0) + (panelJitterOffsetY || 0));
+	}
+	drawHands(true);
+	renderGrabbablesOverClaws(true);
+	drawCloseupBinTags();
 	// updateHand();
 	// handTracker.display();
 	stroke(255,0,0)
@@ -2598,12 +2856,14 @@ function drawPanelClipDifferenceOverlay() {
 			image(body2_xray, bedTrackX, bedTrackY);
 		}
 	}
-
+	
 	blendMode(DIFFERENCE);
+	tint(255, 255); 
 	drawBodyGrabbablePartsDifference();
 	for (let i = 0; i < grabbables.length; i++) {
 		drawGrabbableVisualSnapshot(grabbables[i]);
 	}
+
 	blendMode(BLEND);
 
 	drawingContext.restore();
@@ -2660,11 +2920,15 @@ function renderGrabbablesUnderClaws() {
 	}
 }
 
-function renderGrabbablesOverClaws() {
+function renderGrabbablesOverClaws(onlyFarLayer = false) {
 	const held = [];
 	for (let i = 0; i < grabbables.length; i++) {
-		if (grabbables[i].isGrabbed) {
-			held.push(grabbables[i]);
+		const g = grabbables[i];
+		if (!g.isGrabbed) continue;
+		const handObj = getHandBySide(g.grabbedByHandSide);
+		const isFar = isHandFarForLayer(handObj);
+		if (onlyFarLayer ? isFar : !isFar) {
+			held.push(g);
 		}
 	}
 	held.sort((a, b) => a.pickupOrder - b.pickupOrder);
@@ -2673,9 +2937,13 @@ function renderGrabbablesOverClaws() {
 	}
 }
 
-function drawHands(){
+function drawHands(onlyFarLayer = false){
 	for (let i=0; i<handTracker.hands.length; i++){
 		let h = handTracker.hands[i]
+		const isFar = isHandFarForLayer(h);
+		if (onlyFarLayer ? !isFar : isFar) {
+			continue;
+		}
 		let p = h.getRenderPinchPt();
 		const clawImg = h.pinching ? closedclaw : openclaw;
 		if (!clawImg) {
@@ -2850,6 +3118,9 @@ function setupGrabbablesFromBodyDefs(bodyKey) {
 	}
 	for (let i = 0; i < items.length; i++) {
 		const itemDef = items[i];
+		if (bodyKey !== "tools" && itemDef && itemDef.itemId && String(itemDef.itemId).startsWith("b")) {
+			interactionModel.binTrackEligibleItemIds.add(itemDef.itemId);
+		}
 		const hitboxes = Array.isArray(itemDef.hitboxes) ? itemDef.hitboxes : [];
 		for (let j = 0; j < hitboxes.length; j++) {
 			const hb = hitboxes[j];
@@ -2927,6 +3198,7 @@ function cleanupBodyUninteracted(bodyKey) {
 		if (anyGrabbed) {
 			continue;
 		}
+		markItemNotBinned(itemId);
 		for (let j = 0; j < hitboxes.length; j++) {
 			const g = grabbables[hitboxes[j].grabbableIndex];
 			if (g) {

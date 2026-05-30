@@ -6,10 +6,29 @@ let bedTrackX = 0;
 let bedTrackY = 0;
 let bedTrackBody = 1;
 let frameNowMs = 0;
-const DEBUG_MODE = true; // Toggle debug controls here.
+const DEBUG_MODE = false; // Toggle debug controls here.
 let debugTimerPaused = false;
 let debugPausedRemainingMs = 0;
 const BODY_ENTER_SPEED = 9;
+const CHECK_LABEL_MS = 500;
+const CHECK_INCINERATE_MS = 500;
+const CHECK_RESULT_MS = 750;
+const CHECK_START_DELAY_MS = 1000;
+const CHECK_INCOMING_MS = 600;
+const CHECK_HOLD_MS = 180;
+const CHECK_ARRIVAL_JITTER_MS = 180;
+const CHECK_ARRIVAL_JITTER_MAG = 8;
+let checkPhaseActive = false;
+let checkPhaseDone = false;
+let checkPhasePending = false;
+let checkPhaseStartAtMs = 0;
+let checkEvents = [];
+let checkIndex = 0;
+let checkStage = "incoming"; // "incoming" | "hold" | "incinerate" | "result" | "final"
+let checkStageStartMs = 0;
+let checkFinalText = "";
+let checkIncomingFrames = 0;
+let checkOutgoingFrames = 0;
 
 function preload() {
 	importDrawings();
@@ -129,9 +148,26 @@ function getElasticSlidePosition(elapsedMs, fromY, toY) {
 	const pos = easer["elasticInOut"](timer, 0.85);
 	return map(pos, 0, 1, fromY, toY);
 }
+function getElasticSegmentPosition(elapsedMs, durationMs, fromY, toY) {
+	const t = constrain(elapsedMs / max(1, durationMs), 0, 1);
+	const pos = easer["elasticInOut"](t, 0.85);
+	return map(pos, 0, 1, fromY, toY);
+}
 
 function draw() {
 	frameNowMs = millis();
+	if (checkPhasePending) {
+		if (frameNowMs >= checkPhaseStartAtMs) {
+			beginCheckPhase();
+		} else {
+			drawCheckPhasePause();
+			return;
+		}
+	}
+	if (checkPhaseActive) {
+		drawCheckPhase();
+		return;
+	}
 	if (DEBUG_MODE && debugTimerPaused) {
 		timeLeft = frameNowMs + debugPausedRemainingMs;
 	}
@@ -337,10 +373,6 @@ function draw() {
 	image(rightCab, wc, hc);
 	pop();
 	drawWeg();
-	if (typeof panelOverlay !== "undefined" && panelOverlay) {
-		// Draw panel art above clipped xray/difference layers.
-		image(panelOverlay, wc + (panelJitterOffsetX || 0), hc + (dragPanel?.offsetY || 0) + (panelJitterOffsetY || 0));
-	}
 	noStroke();
 	
 	if (millis() <= textTimer) {
@@ -479,6 +511,16 @@ function draw() {
 						resetToolsToDrawer();
 					}
 				}
+				else if (bodyCount > 3) {
+					if (typeof cleanupBodyUninteracted === "function") {
+						cleanupBodyUninteracted("body3");
+					}
+					if (typeof resetToolsToDrawer === "function") {
+						resetToolsToDrawer();
+					}
+					checkPhasePending = true;
+					checkPhaseStartAtMs = frameNowMs + CHECK_START_DELAY_MS;
+				}
 				framesCounted = restartBuffer;
 				isTimeUp = false;
 			}
@@ -490,6 +532,212 @@ function draw() {
 	if (typeof drawAllDebugOverlays === "function") {
 		drawAllDebugOverlays();
 	}
+}
+
+function beginCheckPhase() {
+	checkPhaseActive = true;
+	checkPhasePending = false;
+	checkPhaseDone = false;
+	checkStage = "incoming";
+	checkStageStartMs = frameNowMs;
+	checkIncomingFrames = 0;
+	checkOutgoingFrames = 0;
+	checkIndex = 0;
+	checkEvents = (typeof getBinSortReplayEvents === "function") ? getBinSortReplayEvents() : [];
+	if (typeof setInteractionLockActive === "function") {
+		setInteractionLockActive(true);
+	}
+	if (Array.isArray(grabbables)) {
+		for (let i = 0; i < grabbables.length; i++) {
+			const g = grabbables[i];
+			if (!g) continue;
+			g.isGrabbed = false;
+			g.active = false;
+			g.visible = false;
+		}
+	}
+}
+
+function drawCheckPhasePause() {
+	image(bg, wc, hc);
+	image(l1, wc, hc);
+	image(l2, wc, hc);
+	image(chutes, wc, hc);
+	drawCabinetUiForCheckPhase();
+	drawWeg();
+	if (typeof drawAllDebugOverlays === "function") {
+		drawAllDebugOverlays();
+	}
+}
+
+function drawCheckPhase() {
+	image(bg, wc, hc);
+	image(l1, wc, hc);
+	image(l2, wc, hc);
+
+	const summary = (typeof getBinSortSummary === "function")
+		? getBinSortSummary()
+		: { correct: 0, eligible: 0 };
+	if (checkIndex >= checkEvents.length) {
+		checkStage = "final";
+	}
+
+	const evt = checkEvents[checkIndex] || null;
+	const elapsed = frameNowMs - checkStageStartMs;
+	const showItem = !!(evt && evt.pic && checkStage !== "result" && checkStage !== "final");
+	let incinerateFxT = 0;
+	if (showItem) {
+		let drawY = hc;
+		if (checkStage === "incoming") {
+			drawY = getElasticSegmentPosition(elapsed, CHECK_INCOMING_MS, -hc, hc);
+		}
+		let drawScale = evt.scale || 1;
+		if (checkStage === "incinerate") {
+			checkOutgoingFrames++;
+			const t = constrain(elapsed / CHECK_INCINERATE_MS, 0, 1);
+			drawY = getElasticSegmentPosition(elapsed, CHECK_INCINERATE_MS, hc, h + 280);
+			drawScale = evt.scale || 1;
+			incinerateFxT = t;
+		}
+		if (checkStage === "incoming" && elapsed <= CHECK_ARRIVAL_JITTER_MS) {
+			const jf = 1 - (elapsed / CHECK_ARRIVAL_JITTER_MS);
+			drawY += random(-CHECK_ARRIVAL_JITTER_MAG, CHECK_ARRIVAL_JITTER_MAG) * jf;
+		}
+		push();
+		translate(wc, drawY);
+		image(bed, 0, 0);
+		rotate(evt.rotation || 0);
+		scale(drawScale);
+		image(evt.pic, 0, 0);
+		pop();
+	}
+	if (checkStage === "incinerate") {
+		push();
+		blendMode(ADD);
+		tint(255, 220 - 180 * incinerateFxT);
+		image(blowup, wc, hc);
+		blendMode(BLEND);
+		tint(255, 255);
+		pop();
+	}
+	// Chutes remain above bed/item replay visuals.
+	image(chutes, wc, hc);
+	drawCabinetUiForCheckPhase();
+	// Keep panel/claws and normal UI simulation active during check phase.
+	drawWeg();
+
+	// Reuse timer area as check/status display.
+	push();
+	noStroke();
+	translate(timerDisplacementX, timerDisplacementY);
+	tint(255, 127);
+	image(screen, wc-3, hc-147);
+	tint(255, 255);
+	image(clock, wc-3, hc-147);
+	textAlign(CENTER);
+	textFont("Courier New", 10);
+	if ((checkStage === "incoming" || checkStage === "hold") && evt) {
+		textSize(textDisplaySize * 0.27);
+		fill(190, 220, 255, 240);
+		text(evt.placedTag || "lithium", wc, hc - 0.5 * textDisplaySize);
+	} else if (checkStage === "result" && evt) {
+		textSize(textDisplaySize * 0.30);
+		fill(evt.correct ? color(120, 255, 120) : color(255, 80, 80));
+		text(evt.correct ? "PASS" : "ERROR", wc, hc - 0.5 * textDisplaySize);
+	} else if (checkStage === "final") {
+		textSize(textDisplaySize * 0.24);
+		fill(220, 240, 255, 250);
+		checkFinalText = `${summary.correct}/${summary.eligible}`;
+		text(checkFinalText, wc, hc - 0.5 * textDisplaySize);
+	}
+	pop();
+
+	// Stage stepping.
+	if (checkStage === "incoming" && elapsed >= CHECK_INCOMING_MS) {
+		checkStage = "hold";
+		checkStageStartMs = frameNowMs;
+		checkIncomingFrames = 0;
+		checkOutgoingFrames = 0;
+	} else if (checkStage === "hold" && elapsed >= CHECK_HOLD_MS) {
+		checkStage = "incinerate";
+		checkStageStartMs = frameNowMs;
+		checkIncomingFrames = 0;
+		checkOutgoingFrames = 0;
+		blowup.reset();
+		if (typeof blaze !== "undefined" && blaze && typeof blaze.play === "function") {
+			blaze.play();
+		}
+	} else if (checkStage === "incinerate" && elapsed >= CHECK_INCINERATE_MS) {
+		checkStage = "result";
+		checkStageStartMs = frameNowMs;
+		checkOutgoingFrames = 0;
+	} else if (checkStage === "result" && elapsed >= CHECK_RESULT_MS) {
+		checkIndex++;
+		checkStage = "incoming";
+		checkStageStartMs = frameNowMs;
+		checkIncomingFrames = 0;
+		checkOutgoingFrames = 0;
+	} else if (checkStage === "final" && !checkPhaseDone) {
+		checkPhaseDone = true;
+		noLoop();
+	}
+	if (typeof drawAllDebugOverlays === "function") {
+		drawAllDebugOverlays();
+	}
+}
+
+function drawCabinetUiForCheckPhase() {
+	push();
+	translate(0, 50);
+	if(alkalineIsOpen) {
+		image(can1_open, wc + (lidTopJitterOffsetX || 0), hc + (lidTopJitterOffsetY || 0));
+		can1_close.reset();
+	} else {
+		image(can1_close, wc + (lidTopJitterOffsetX || 0), hc + (lidTopJitterOffsetY || 0));
+		can1_open.reset();
+	}
+	if(lithiumIsOpen) {
+		image(can2_open, wc + (lidBottomJitterOffsetX || 0), hc + (lidBottomJitterOffsetY || 0));
+		can2_close.reset();
+	} else {
+		image(can2_close, wc + (lidBottomJitterOffsetX || 0), hc + (lidBottomJitterOffsetY || 0));
+		can2_open.reset();
+	}
+	if (scalpelInUse == true) {
+		image(r1empty, wc, hc);
+	} else if (r1isOpen == 1) {
+		image(r1open, wc, hc);
+		r1close.reset();
+	} else if (r1isOpen == -1) {
+		image(r1close, wc, hc);
+		r1open.reset();
+	} else {
+		image(r1, wc, hc);
+	}
+	if (bonesawInUse == true) {
+		image(r2empty, wc, hc);
+	} else if (r2isOpen == 1) {
+		image(r2open, wc, hc);
+		r2close.reset();
+	} else if (r2isOpen == -1) {
+		image(r2close, wc, hc);
+		r2open.reset();
+	} else {
+		image(r2, wc, hc);
+	}
+	if (hammerInUse == true) {
+		image(r3empty, wc, hc);
+	} else if (r3isOpen == 1) {
+		image(r3open, wc, hc);
+		r3close.reset();
+	} else if (r3isOpen == -1) {
+		image(r3close, wc, hc);
+		r3open.reset();
+	} else {
+		image(r3, wc, hc);
+	}
+	image(rightCab, wc, hc);
+	pop();
 }
 
 function timesUp(){
