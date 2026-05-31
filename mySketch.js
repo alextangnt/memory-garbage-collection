@@ -933,6 +933,10 @@ function timesUp(){
 }
 
 function mouseClicked() {
+	if (startScreenActive || (checkPhaseActive && checkStage === "final_prompt")) {
+		requestRestartWithTransition();
+		return false;
+	}
 	print(round(mouseX) + ", " + round(mouseY));
 }
 
