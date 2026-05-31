@@ -504,10 +504,15 @@ function drawCloseupBinTags() {
 	for (let i = 0; i < grabbables.length; i++) {
 		const g = grabbables[i];
 		if (!g || !g.visible || !g.pic || !g.active || !g.isGrabbed) continue;
-		if (!g.modelItemId || !g.modelItemId.startsWith("b")) continue;
+		if (!g.modelItemId) continue;
 		const ownerHand = getHandBySide(g.grabbedByHandSide);
 		if (!isHandFarForLayer(ownerHand)) continue;
-		const tag = g.binTag || "lithium";
+		let tag = g.binTag || "lithium";
+		if (isToolItem(g.itemID)) {
+			if (g.modelItemId === "tool_scalpel") tag = "SCALPEL";
+			else if (g.modelItemId === "tool_bonesaw") tag = "BONESAW";
+			else if (g.modelItemId === "tool_hammer") tag = "HAMMER";
+		}
 		const bx = g.pt.x + CLOSEUP_BIN_LABEL_OFFSET_X;
 		const by = g.pt.y + CLOSEUP_BIN_LABEL_OFFSET_Y;
 		const jx = random(-CLOSEUP_LABEL_GLITCH_JITTER, CLOSEUP_LABEL_GLITCH_JITTER);
@@ -537,6 +542,30 @@ function drawCloseupBinTags() {
 		text(tag, bx, by);
 	}
 	pop();
+}
+
+function resetToolAfterBinDrop(toolG) {
+	if (!toolG || !toolG.modelItemId) return;
+	const drawerIdx = getDrawerIndexForToolItemId(toolG.modelItemId);
+	toolG.isGrabbed = false;
+	toolG.active = false;
+	toolG.visible = false;
+	toolG.isConsumed = false;
+	toolG.pendingDrawerDock = false;
+	toolG.returningToDrawer = false;
+	toolG.returnDrawerIdx = -1;
+	toolG.hasEverBeenPickedUp = true;
+	toss(toolG);
+	if (drawerIdx === 0) {
+		scalpelInUse = false;
+		r1isOpen = -1;
+	} else if (drawerIdx === 1) {
+		bonesawInUse = false;
+		r2isOpen = -1;
+	} else if (drawerIdx === 2) {
+		hammerInUse = false;
+		r3isOpen = -1;
+	}
 }
 
 function getBinSortSummary() {
@@ -1189,6 +1218,11 @@ function updateBinIntake() {
 			const g = grabbables[i];
 			if (!g || g.isGrabbed || g.binConsumeActive || !g.visible) continue;
 			if (g.pt.x < entry.def.x1 || g.pt.x > entry.def.x2 || g.pt.y < entry.def.y1 || g.pt.y > entry.def.y2) continue;
+			if (isToolItem(g.itemID)) {
+				resetToolAfterBinDrop(g);
+				startedAny = true;
+				continue;
+			}
 			startBinConsume(entry.key, g, entry.def.centerX, entry.def.centerY);
 			startedAny = true;
 		}
@@ -2709,6 +2743,7 @@ function drawWeg() {
 	drawHands(false);
 	renderGrabbablesOverClaws(false);
 	drawPanelClipDifferenceOverlay();
+	drawPanelMaskedPromptText();
 	if (typeof panelOverlay !== "undefined" && panelOverlay) {
 		// Keep panel above clipped xray/difference content but below far-layer claws/items.
 		image(panelOverlay, wc + (panelJitterOffsetX || 0), hc + (dragPanel?.offsetY || 0) + (panelJitterOffsetY || 0));
@@ -2728,6 +2763,62 @@ function drawWeg() {
 			line(zig[i].x+zstart.x,zig[i].y+zstart.y,zig[i+1].x+zstart.x,zig[i+1].y+zstart.y);
 		}
 	}
+}
+
+function drawPanelMaskedPromptText() {
+	const cfg = globalThis.panelMaskedPrompt;
+	if (!cfg || !Array.isArray(cfg.lines) || cfg.lines.length === 0) return;
+	const rect = getPanelClipRect(false); // Static clip; do not follow panel offset.
+	if (!rect) return;
+	const { x1, y1, x2, y2 } = rect;
+	if (x2 <= x1 || y2 <= y1) return;
+	const cx = (x1 + x2) * 0.5;
+	const cy = (y1 + y2) * 0.5;
+	push();
+	drawingContext.save();
+	drawingContext.beginPath();
+	drawingContext.rect(x1, y1, x2 - x1, y2 - y1);
+	drawingContext.clip();
+	noStroke();
+	textAlign(CENTER, CENTER);
+	textFont("Courier New", 10);
+	const jitter = cfg.jitter ?? 1.6;
+	const c = (cfg.chromatic ?? 0.005);
+	const lineGap = cfg.lineGap ?? 60;
+	for (let i = 0; i < cfg.lines.length; i++) {
+		const ln = cfg.lines[i];
+		const txt = String(ln.text || "");
+		const sz = ln.size || 36;
+		const y = cy + (i - (cfg.lines.length - 1) * 0.5) * lineGap + (ln.dy || 0);
+		textSize(sz);
+		const jx = random(-jitter, jitter);
+		const jy = random(-jitter, jitter);
+		fill(170, 200, 255, 130);
+		text(txt, (1 - c) * cx + jx, (1 - c) * y + jy);
+		fill(255, 170, 170, 120);
+		text(txt, cx + jx * 0.6, y + jy * 0.6);
+		fill(190, 255, 210, 210);
+		text(txt, (1 + c) * cx + jx * 0.3, (1 + c) * y + jy * 0.3);
+	}
+	drawingContext.restore();
+	pop();
+}
+
+function getPanelClipRect(applyPanelOffset = true) {
+	const clipCfg = uiConfig.panelClip || {};
+	const hasRawCorners =
+		typeof clipCfg.x1 === "number" &&
+		typeof clipCfg.y1 === "number" &&
+		typeof clipCfg.x2 === "number" &&
+		typeof clipCfg.y2 === "number";
+	const insetX = (typeof clipCfg.insetX === "number") ? clipCfg.insetX : 50;
+	const extendY = (typeof clipCfg.extendY === "number") ? clipCfg.extendY : 50;
+	const x1 = hasRawCorners ? clipCfg.x1 : (uiConfig.panel.x1 + insetX);
+	const x2 = hasRawCorners ? clipCfg.x2 : (uiConfig.panel.x2 - insetX);
+	const y1Base = hasRawCorners ? clipCfg.y1 : (uiConfig.panel.y1 - extendY);
+	const y2Base = hasRawCorners ? clipCfg.y2 : (uiConfig.panel.y2 + extendY);
+	const panelOffset = applyPanelOffset ? dragPanel.offsetY : 0;
+	return { x1, x2, y1: y1Base + panelOffset, y2: y2Base + panelOffset };
 }
 
 function drawDebugInteractableHitboxes() {
@@ -2817,20 +2908,9 @@ function drawGrabbableVisualSnapshot(g) {
 }
 
 function drawPanelClipDifferenceOverlay() {
-	const clipCfg = uiConfig.panelClip || {};
-	const hasRawCorners =
-		typeof clipCfg.x1 === "number" &&
-		typeof clipCfg.y1 === "number" &&
-		typeof clipCfg.x2 === "number" &&
-		typeof clipCfg.y2 === "number";
-	const insetX = (typeof clipCfg.insetX === "number") ? clipCfg.insetX : 50;
-	const extendY = (typeof clipCfg.extendY === "number") ? clipCfg.extendY : 50;
-	const x1 = hasRawCorners ? clipCfg.x1 : (uiConfig.panel.x1 + insetX);
-	const x2 = hasRawCorners ? clipCfg.x2 : (uiConfig.panel.x2 - insetX);
-	const y1Base = hasRawCorners ? clipCfg.y1 : (uiConfig.panel.y1 - extendY);
-	const y2Base = hasRawCorners ? clipCfg.y2 : (uiConfig.panel.y2 + extendY);
-	const y1 = y1Base + dragPanel.offsetY;
-	const y2 = y2Base + dragPanel.offsetY;
+	const clipRect = getPanelClipRect(true);
+	if (!clipRect) return;
+	const { x1, y1, x2, y2 } = clipRect;
 	if (x2 <= x1 || y2 <= y1) return;
 
 	push();
@@ -2855,6 +2935,10 @@ function drawPanelClipDifferenceOverlay() {
 		} else if (bedTrackBody === 2 && typeof body2_xray !== "undefined" && body2_xray) {
 			image(body2_xray, bedTrackX, bedTrackY);
 		}
+		else if (bedTrackBody === 3 && typeof body3_xray !== "undefined" && body3_xray) {
+			image(body3_xray, bedTrackX, bedTrackY);
+		}
+		
 	}
 	
 	blendMode(DIFFERENCE);
@@ -2902,8 +2986,8 @@ function drawBodyGrabbablePartsDifference() {
 		const hasSkin = !hasModelItemBeenInteracted("b3_skin");
 		const hasBrain = !hasModelItemBeenInteracted("b3_brain");
 		if (hasFoot && typeof body3foot !== "undefined" && body3foot) image(body3foot, x, y);
-		if (hasGuts && (!hasSkin) && typeof body3guts !== "undefined" && body3guts) image(body3guts, x, y);
-		if (hasBrain && (!hasSkull) && typeof body3brain !== "undefined" && body3brain) image(body3brain, x, y);
+		if (hasGuts && typeof body3guts !== "undefined" && body3guts) image(body3guts, x, y);
+		if (hasBrain && typeof body3brain !== "undefined" && body3brain) image(body3brain, x, y);
 	}
 }
 
@@ -3152,6 +3236,36 @@ function setupBody1() { setupGrabbablesFromBodyDefs("body1"); }
 function setupTools() { setupGrabbablesFromBodyDefs("tools"); }
 function setupBody2() { setupGrabbablesFromBodyDefs("body2"); }
 function setupBody3() { setupGrabbablesFromBodyDefs("body3"); }
+
+function resetWegGameState() {
+	grabbables.length = 0;
+	hands = [];
+	hand = [];
+	globalPinchGeneration = 0;
+	grabRenderCounter = 0;
+	interactionLockActive = false;
+	drawerGrabState.left = null;
+	drawerGrabState.right = null;
+	binGrabState.left = null;
+	binGrabState.right = null;
+	binConsumeState.top = [];
+	binConsumeState.bottom = [];
+	binConsumeHadActive.top = false;
+	binConsumeHadActive.bottom = false;
+	panelJitterOffsetX = 0;
+	panelJitterOffsetY = 0;
+	lidTopJitterOffsetX = 0;
+	lidTopJitterOffsetY = 0;
+	lidBottomJitterOffsetX = 0;
+	lidBottomJitterOffsetY = 0;
+	panelJitterState = { framesLeft: 0, mag: 0 };
+	lidJitterStateTop = { framesLeft: 0, mag: 0 };
+	lidJitterStateBottom = { framesLeft: 0, mag: 0 };
+	handTracker = new tracker();
+	resetInteractionModel();
+	setupBody1();
+	setupTools();
+}
 
 function setBodyGrabbablesActive(bodyNum, isActive) {
 	const bodyKey = bodyNum === 1 ? "body1" : (bodyNum === 2 ? "body2" : (bodyNum === 3 ? "body3" : null));

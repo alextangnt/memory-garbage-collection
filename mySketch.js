@@ -18,17 +18,39 @@ const CHECK_INCOMING_MS = 600;
 const CHECK_HOLD_MS = 180;
 const CHECK_ARRIVAL_JITTER_MS = 180;
 const CHECK_ARRIVAL_JITTER_MAG = 8;
+const BODY_EXIT_INCINERATE_MS = 3000;
+const CHECK_FINAL_SCORE_HOLD_MS = 1000;
+const CHECK_PANEL_SHOW_MS = 700;
+const RESTART_TRANSITION_MS = 900;
+const RESTART_TIMER_DELAY_MS = 180;
+const START_SCREEN_TIMER_IN_MS = 700;
+const START_SCREEN_PANEL_IN_MS = 700;
 let checkPhaseActive = false;
 let checkPhaseDone = false;
 let checkPhasePending = false;
 let checkPhaseStartAtMs = 0;
+let checkPhasePanelHideActive = false;
+let checkPhasePanelHideStartMs = 0;
+let checkPhasePanelHideFromOffsetY = 0;
 let checkEvents = [];
 let checkIndex = 0;
-let checkStage = "incoming"; // "incoming" | "hold" | "incinerate" | "result" | "final"
+let checkStage = "incoming"; // "incoming" | "hold" | "incinerate" | "result" | "final_score" | "final_prompt"
 let checkStageStartMs = 0;
 let checkFinalText = "";
 let checkIncomingFrames = 0;
 let checkOutgoingFrames = 0;
+let forceAdvanceQueued = false;
+let restartTransitionActive = false;
+let restartTransitionStartMs = 0;
+let restartTransitionTimerFromY = 0;
+let restartTransitionBodyFromY = 0;
+let restartTransitionPanelFromOffsetY = 0;
+let restartTransitionAnimateBody = false;
+let restartTransitionDelayTimer = false;
+let startScreenActive = true;
+let startScreenStartMs = 0;
+let timerIntroActive = true;
+let timerIntroStartMs = 0;
 
 function preload() {
 	importDrawings();
@@ -37,7 +59,7 @@ function preload() {
 }
 function setup() {
 	incinerateTimer = 0;
-	doneIncinerating = 3000;
+	doneIncinerating = BODY_EXIT_INCINERATE_MS;
 	restartBuffer = 50;
 	body2Setted = false;
 	body3Setted = false;
@@ -89,7 +111,7 @@ function setup() {
 	timerDisplacementY = -300;
 	
 	//begin
-	// bgm.play();
+	bgm.play();
 	
 	bodyCount = 1;
 	
@@ -117,6 +139,17 @@ function setup() {
 	
 	alkalineIsOpen = false;
 	lithiumIsOpen = false;
+	startScreenActive = true;
+	startScreenStartMs = millis();
+	timerIntroActive = true;
+	timerIntroStartMs = startScreenStartMs;
+	// Start screen starts with drawers closed.
+	r1isOpen = 0;
+	r2isOpen = 0;
+	r3isOpen = 0;
+	if (typeof setInteractionLockActive === "function") {
+		setInteractionLockActive(false);
+	}
 	
 }
 
@@ -156,8 +189,24 @@ function getElasticSegmentPosition(elapsedMs, durationMs, fromY, toY) {
 
 function draw() {
 	frameNowMs = millis();
+	globalThis.panelMaskedPrompt = null;
+	if (restartTransitionActive) {
+		drawRestartTransition();
+		return;
+	}
+	if (startScreenActive) {
+		drawStartScreen();
+		return;
+	}
+	if (forceAdvanceQueued) {
+		forceAdvanceQueued = false;
+		forceAdvanceStage();
+	}
 	if (checkPhasePending) {
-		if (frameNowMs >= checkPhaseStartAtMs) {
+		if (checkPhasePanelHideActive) {
+			updateCheckPhasePanelHide();
+		}
+		if (frameNowMs >= checkPhaseStartAtMs && !checkPhasePanelHideActive) {
 			beginCheckPhase();
 		} else {
 			drawCheckPhasePause();
@@ -257,6 +306,11 @@ function draw() {
 		setBodyGrabbablesActive(1, body1ReadyForGrab);
 		setBodyGrabbablesActive(2, body2ReadyForGrab);
 		setBodyGrabbablesActive(3, body3ReadyForGrab);
+	}
+	const bodyReadyForGrab = (bodyCount === 1 && body1ReadyForGrab) || (bodyCount === 2 && body2ReadyForGrab) || (bodyCount === 3 && body3ReadyForGrab);
+	const countdownRunning = !debugTimerPaused && !checkPhaseActive && !checkPhasePending && !isTimeUp && !incinerate && bodyReadyForGrab;
+	if (!countdownRunning) {
+		timeLeft += deltaTime;
 	}
 	image(chutes, wc, hc);
 	
@@ -429,15 +483,34 @@ function draw() {
 	
 	//timer
 	secondsLeft = (int(((timeLeft - frameNowMs)/1000)));
+	let timerYNow = timerDisplacementY;
+	if (timerIntroActive) {
+		const tElapsed = frameNowMs - timerIntroStartMs;
+		timerYNow = getElasticSegmentPosition(tElapsed, START_SCREEN_TIMER_IN_MS, -900, timerDisplacementY);
+		if (tElapsed >= START_SCREEN_TIMER_IN_MS) {
+			timerIntroActive = false;
+			timerYNow = timerDisplacementY;
+		}
+	}
 	push();
-	translate(timerDisplacementX, timerDisplacementY);
+	translate(timerDisplacementX, timerYNow);
 	tint(255, 127);
 	image(screen, wc-3, hc-147);
 	tint(255, 255);
 	image(clock, wc-3, hc-147);
 	textAlign(CENTER);
 	textFont('Courier New', 10);
-	if (secondsLeft >0)
+	const isLoadingTransition = (!checkPhaseActive && !checkPhasePending) && (!bodyReadyForGrab || isTimeUp) && !incinerate;
+	if (isLoadingTransition)
+	{
+		textSize(textDisplaySize*0.18);
+		const loadingText = bodyCount > 3 ? "LOADING RESULTS" : "LOADING BODY";
+		const flashOn = !(isTimeUp || incinerate) || (int(frameNowMs / 120) % 2 === 0);
+		const baseA = flashOn ? 255 : 100;
+		fill(182+xNoise*brightnessBuffer, 182+xNoise*brightnessBuffer, 255, baseA);
+		text(loadingText, wc, hc-0.5*textDisplaySize-yNoise*15);
+	}
+	else if (secondsLeft >0)
 	{
 		textSize(textDisplaySize*0.3);
 		milli = int(((timeLeft - frameNowMs)%1000)/60);
@@ -520,6 +593,9 @@ function draw() {
 					}
 					checkPhasePending = true;
 					checkPhaseStartAtMs = frameNowMs + CHECK_START_DELAY_MS;
+					checkPhasePanelHideActive = true;
+					checkPhasePanelHideStartMs = frameNowMs;
+					checkPhasePanelHideFromOffsetY = (typeof dragPanel !== "undefined") ? dragPanel.offsetY : 0;
 				}
 				framesCounted = restartBuffer;
 				isTimeUp = false;
@@ -558,6 +634,46 @@ function beginCheckPhase() {
 	}
 }
 
+function drawStartScreen() {
+	image(bg, wc, hc);
+	image(l1, wc, hc);
+	image(l2, wc, hc);
+	image(chutes, wc, hc);
+	drawCabinetUiForCheckPhase();
+	const elapsed = frameNowMs - startScreenStartMs;
+	if (typeof dragPanel !== "undefined" && typeof uiConfig !== "undefined" && uiConfig.panel) {
+		if (elapsed <= START_SCREEN_PANEL_IN_MS) {
+			const fromOffset = -uiConfig.panel.y1;
+			dragPanel.offsetY = getElasticSegmentPosition(elapsed, START_SCREEN_PANEL_IN_MS, fromOffset, 0);
+			dragPanel.prevOffsetY = dragPanel.offsetY;
+		}
+	}
+	globalThis.panelMaskedPrompt = {
+		jitter: 1.8,
+		chromatic: 0.004,
+		lineGap: 86,
+		lines: [
+			{ text: "MEMORY GARBAGE COLLECTION", size: textDisplaySize * 0.20, dy: -20 },
+			{ text: "PRESS ANY KEY TO START", size: textDisplaySize * 0.11, dy: 48 }
+		]
+	};
+	drawWeg();
+	// Timer panel animates in from above.
+	const timerY = getElasticSegmentPosition(elapsed, START_SCREEN_TIMER_IN_MS, -900, timerDisplacementY);
+	push();
+	noStroke();
+	translate(timerDisplacementX, timerY);
+	tint(255, 127);
+	image(screen, wc-3, hc-147);
+	tint(255, 255);
+	image(clock, wc-3, hc-147);
+	pop();
+
+	if (typeof drawAllDebugOverlays === "function") {
+		drawAllDebugOverlays();
+	}
+}
+
 function drawCheckPhasePause() {
 	image(bg, wc, hc);
 	image(l1, wc, hc);
@@ -565,6 +681,21 @@ function drawCheckPhasePause() {
 	image(chutes, wc, hc);
 	drawCabinetUiForCheckPhase();
 	drawWeg();
+	// Keep timer panel continuous during the body3->results pending gap.
+	push();
+	noStroke();
+	translate(timerDisplacementX, timerDisplacementY);
+	tint(255, 127);
+	image(screen, wc-3, hc-147);
+	tint(255, 255);
+	image(clock, wc-3, hc-147);
+	textAlign(CENTER);
+	textFont("Courier New", 10);
+	textSize(textDisplaySize * 0.18);
+	const flashOn = (int(frameNowMs / 120) % 2 === 0);
+	fill(182 + xNoise * brightnessBuffer, 182 + xNoise * brightnessBuffer, 255, flashOn ? 255 : 100);
+	text("LOADING RESULTS", wc, hc - 0.5 * textDisplaySize);
+	pop();
 	if (typeof drawAllDebugOverlays === "function") {
 		drawAllDebugOverlays();
 	}
@@ -575,16 +706,30 @@ function drawCheckPhase() {
 	image(l1, wc, hc);
 	image(l2, wc, hc);
 
+	if (checkStage === "final_prompt") {
+		globalThis.panelMaskedPrompt = {
+			jitter: 1.8,
+			chromatic: 0.004,
+			lineGap: 90,
+			lines: [
+				{ text: "PRESS ANY KEY TO RESTART", size: textDisplaySize * 0.20, dy: 0 }
+			]
+		};
+	}
+
 	const summary = (typeof getBinSortSummary === "function")
 		? getBinSortSummary()
 		: { correct: 0, eligible: 0 };
 	if (checkIndex >= checkEvents.length) {
-		checkStage = "final";
+		if (checkStage !== "final_score" && checkStage !== "final_prompt") {
+			checkStage = "final_score";
+			checkStageStartMs = frameNowMs;
+		}
 	}
 
 	const evt = checkEvents[checkIndex] || null;
 	const elapsed = frameNowMs - checkStageStartMs;
-	const showItem = !!(evt && evt.pic && checkStage !== "result" && checkStage !== "final");
+	const showItem = !!(evt && evt.pic && checkStage !== "result" && checkStage !== "final_score" && checkStage !== "final_prompt");
 	let incinerateFxT = 0;
 	if (showItem) {
 		let drawY = hc;
@@ -644,14 +789,13 @@ function drawCheckPhase() {
 		textSize(textDisplaySize * 0.30);
 		fill(evt.correct ? color(120, 255, 120) : color(255, 80, 80));
 		text(evt.correct ? "PASS" : "ERROR", wc, hc - 0.5 * textDisplaySize);
-	} else if (checkStage === "final") {
+	} else if (checkStage === "final_score" || checkStage === "final_prompt") {
 		textSize(textDisplaySize * 0.24);
-		fill(220, 240, 255, 250);
 		checkFinalText = `${summary.correct}/${summary.eligible}`;
+		fill(220, 240, 255, 250);
 		text(checkFinalText, wc, hc - 0.5 * textDisplaySize);
 	}
 	pop();
-
 	// Stage stepping.
 	if (checkStage === "incoming" && elapsed >= CHECK_INCOMING_MS) {
 		checkStage = "hold";
@@ -677,9 +821,18 @@ function drawCheckPhase() {
 		checkStageStartMs = frameNowMs;
 		checkIncomingFrames = 0;
 		checkOutgoingFrames = 0;
-	} else if (checkStage === "final" && !checkPhaseDone) {
-		checkPhaseDone = true;
-		noLoop();
+	} else if (checkStage === "final_score" && elapsed >= CHECK_FINAL_SCORE_HOLD_MS) {
+		checkStage = "final_prompt";
+		checkStageStartMs = frameNowMs;
+		if (typeof setInteractionLockActive === "function") {
+			setInteractionLockActive(false);
+		}
+	} else if (checkStage === "final_prompt") {
+		const pElapsed = frameNowMs - checkStageStartMs;
+		if (pElapsed <= CHECK_PANEL_SHOW_MS) {
+			dragPanel.offsetY = getElasticSegmentPosition(pElapsed, CHECK_PANEL_SHOW_MS, -uiConfig.panel.y1, 0);
+			dragPanel.prevOffsetY = dragPanel.offsetY;
+		}
 	}
 	if (typeof drawAllDebugOverlays === "function") {
 		drawAllDebugOverlays();
@@ -707,9 +860,18 @@ function drawCabinetUiForCheckPhase() {
 		image(r1empty, wc, hc);
 	} else if (r1isOpen == 1) {
 		image(r1open, wc, hc);
+		const scalpelG = getToolGrabbable("tool_scalpel");
+		untoss(scalpelG);
+		if (scalpelG) {
+			scalpelG.active = true;
+			scalpelG.isConsumed = false;
+			scalpelG.visible = false;
+			scalpelG.wasGrabbedLastFrame = false;
+		}
 		r1close.reset();
 	} else if (r1isOpen == -1) {
 		image(r1close, wc, hc);
+		toss(getToolGrabbable("tool_scalpel"));
 		r1open.reset();
 	} else {
 		image(r1, wc, hc);
@@ -718,9 +880,18 @@ function drawCabinetUiForCheckPhase() {
 		image(r2empty, wc, hc);
 	} else if (r2isOpen == 1) {
 		image(r2open, wc, hc);
+		const bonesawG = getToolGrabbable("tool_bonesaw");
+		untoss(bonesawG);
+		if (bonesawG) {
+			bonesawG.active = true;
+			bonesawG.isConsumed = false;
+			bonesawG.visible = false;
+			bonesawG.wasGrabbedLastFrame = false;
+		}
 		r2close.reset();
 	} else if (r2isOpen == -1) {
 		image(r2close, wc, hc);
+		toss(getToolGrabbable("tool_bonesaw"));
 		r2open.reset();
 	} else {
 		image(r2, wc, hc);
@@ -729,9 +900,18 @@ function drawCabinetUiForCheckPhase() {
 		image(r3empty, wc, hc);
 	} else if (r3isOpen == 1) {
 		image(r3open, wc, hc);
+		const hammerG = getToolGrabbable("tool_hammer");
+		untoss(hammerG);
+		if (hammerG) {
+			hammerG.active = true;
+			hammerG.isConsumed = false;
+			hammerG.visible = false;
+			hammerG.wasGrabbedLastFrame = false;
+		}
 		r3close.reset();
 	} else if (r3isOpen == -1) {
 		image(r3close, wc, hc);
+		toss(getToolGrabbable("tool_hammer"));
 		r3open.reset();
 	} else {
 		image(r3, wc, hc);
@@ -843,10 +1023,14 @@ function keyTyped() {
 }
 
 function keyPressed() {
-	if (!DEBUG_MODE) {
-		return;
+	if (startScreenActive) {
+		requestRestartWithTransition();
+		return false;
 	}
-
+	if (checkPhaseActive && checkStage === "final_prompt") {
+		requestRestartWithTransition();
+		return false;
+	}
 	if (keyCode === 32) { // Space
 		debugTimerPaused = !debugTimerPaused;
 		if (debugTimerPaused) {
@@ -858,19 +1042,205 @@ function keyPressed() {
 	}
 
 	if (keyCode === RIGHT_ARROW) {
-		// Force only the current timer to end and run normal body exit/advance flow.
-		debugTimerPaused = false;
-		debugPausedRemainingMs = 0;
-		timeLeft = frameNowMs;
-		timesUp();
+		// Advance to next stage regardless of current stage.
+		forceAdvanceQueued = true;
 		return false;
 	}
 
 	if (keyCode === ESCAPE) {
-		// Full game restart.
-		window.location.reload();
+		requestRestartWithTransition();
 		return false;
 	}
+}
+
+function restartGameInPlace() {
+	// Backward compatibility entrypoint.
+	requestRestartWithTransition();
+}
+
+function restartGameInPlaceCore() {
+	loop();
+	incinerateTimer = 0;
+	doneIncinerating = BODY_EXIT_INCINERATE_MS;
+	body2Setted = false;
+	body3Setted = false;
+	timeLeft = millis() + levelTime;
+	bodyCount = 1;
+	isTimeUp = false;
+	incinerate = false;
+	framesCounted = 0;
+	checkPhaseActive = false;
+	checkPhaseDone = false;
+	checkPhasePending = false;
+	checkPhaseStartAtMs = 0;
+	checkPhasePanelHideActive = false;
+	checkPhasePanelHideStartMs = 0;
+	checkPhasePanelHideFromOffsetY = 0;
+	checkEvents = [];
+	checkIndex = 0;
+	checkStage = "incoming";
+	checkStageStartMs = millis();
+	checkFinalText = "";
+	checkIncomingFrames = 0;
+	checkOutgoingFrames = 0;
+	forceAdvanceQueued = false;
+	restartTransitionActive = false;
+	restartTransitionStartMs = 0;
+	startScreenActive = false;
+	startScreenStartMs = 0;
+	timerIntroActive = true;
+	timerIntroStartMs = millis();
+	debugTimerPaused = false;
+	debugPausedRemainingMs = 0;
+	typable = true;
+	typedWord = "";
+	textTimer = 0;
+	notif = "NOTIF NOT INITIALIZED";
+	r1isOpen = 0;
+	r2isOpen = 0;
+	r3isOpen = 0;
+	scalpelInUse = false;
+	bonesawInUse = false;
+	hammerInUse = false;
+	alkalineIsOpen = false;
+	lithiumIsOpen = false;
+	if (typeof setInteractionLockActive === "function") {
+		setInteractionLockActive(false);
+	}
+	if (typeof resetWegGameState === "function") {
+		resetWegGameState();
+	}
+	if (typeof dragPanel !== "undefined" && typeof uiConfig !== "undefined" && uiConfig.panel) {
+		dragPanel.offsetY = -uiConfig.panel.y1;
+		dragPanel.prevOffsetY = dragPanel.offsetY;
+		dragPanel.initialOffsetY = dragPanel.offsetY;
+		dragPanel.returnAnimating = false;
+		dragPanel.returnFrame = 0;
+		dragPanel.wasAtVerticalBound = false;
+	}
+}
+
+function requestRestartWithTransition() {
+	if (restartTransitionActive) return;
+	restartTransitionActive = true;
+	restartTransitionStartMs = frameNowMs || millis();
+	restartTransitionTimerFromY = timerDisplacementY;
+	restartTransitionBodyFromY = (typeof bedTrackY === "number") ? bedTrackY : hc;
+	restartTransitionPanelFromOffsetY = (typeof dragPanel !== "undefined") ? dragPanel.offsetY : 0;
+	restartTransitionAnimateBody = (!startScreenActive && bodyCount >= 1 && bodyCount <= 3 && restartTransitionBodyFromY > -hc && restartTransitionBodyFromY < h + hc);
+	restartTransitionDelayTimer = !!(startScreenActive || (checkPhaseActive && checkStage === "final_prompt"));
+	if (r1isOpen === 1) r1isOpen = -1;
+	if (r2isOpen === 1) r2isOpen = -1;
+	if (r3isOpen === 1) r3isOpen = -1;
+	alkalineIsOpen = false;
+	lithiumIsOpen = false;
+}
+
+function drawRestartTransition() {
+	const now = frameNowMs || millis();
+	const elapsed = now - restartTransitionStartMs;
+	const t = constrain(elapsed / RESTART_TRANSITION_MS, 0, 1);
+	const bodyY = getElasticSegmentPosition(elapsed, RESTART_TRANSITION_MS, restartTransitionBodyFromY, h + (hc * 2.5));
+	image(bg, wc, hc);
+	image(l1, wc, hc);
+	image(l2, wc, hc);
+	if (restartTransitionAnimateBody) {
+		if (bodyCount === 1) drawBody1(wc, bodyY);
+		else if (bodyCount === 2) drawBody2(wc, bodyY);
+		else if (bodyCount === 3) drawBody3(wc, bodyY);
+	}
+	image(chutes, wc, hc);
+	drawCabinetUiForCheckPhase();
+	if (typeof dragPanel !== "undefined" && typeof uiConfig !== "undefined" && uiConfig.panel) {
+		dragPanel.offsetY = getElasticSegmentPosition(elapsed, RESTART_TRANSITION_MS, restartTransitionPanelFromOffsetY, -uiConfig.panel.y1);
+		dragPanel.prevOffsetY = dragPanel.offsetY;
+	}
+	if (typeof drawWeg === "function") drawWeg();
+	const timerElapsed = restartTransitionDelayTimer ? max(0, elapsed - RESTART_TIMER_DELAY_MS) : elapsed;
+	push();
+	translate(timerDisplacementX, getElasticSegmentPosition(timerElapsed, RESTART_TRANSITION_MS, restartTransitionTimerFromY, -900));
+	tint(255, 127);
+	image(screen, wc-3, hc-147);
+	tint(255, 255);
+	image(clock, wc-3, hc-147);
+	pop();
+	if (t >= 1) {
+		restartTransitionActive = false;
+		restartTransitionAnimateBody = false;
+		restartGameInPlaceCore();
+	}
+}
+
+function updateCheckPhasePanelHide() {
+	if (!checkPhasePanelHideActive || typeof uiConfig === "undefined" || !uiConfig.panel || typeof dragPanel === "undefined") return;
+	const elapsed = frameNowMs - checkPhasePanelHideStartMs;
+	const nextOffset = getElasticSegmentPosition(elapsed, CHECK_START_DELAY_MS, checkPhasePanelHideFromOffsetY, -uiConfig.panel.y1);
+	dragPanel.offsetY = nextOffset;
+	dragPanel.prevOffsetY = nextOffset;
+	if (elapsed >= CHECK_START_DELAY_MS) {
+		dragPanel.offsetY = -uiConfig.panel.y1;
+		dragPanel.prevOffsetY = dragPanel.offsetY;
+		checkPhasePanelHideActive = false;
+	}
+}
+
+function forceAdvanceStage() {
+	debugTimerPaused = false;
+	debugPausedRemainingMs = 0;
+	if (checkPhasePending) {
+		beginCheckPhase();
+		return;
+	}
+	if (checkPhaseActive) {
+		if (checkStage === "incoming") {
+			checkStage = "hold";
+			checkStageStartMs = frameNowMs;
+			return;
+		}
+		if (checkStage === "hold") {
+			checkStage = "incinerate";
+			checkStageStartMs = frameNowMs;
+			blowup.reset();
+			if (typeof blaze !== "undefined" && blaze && typeof blaze.play === "function") blaze.play();
+			return;
+		}
+		if (checkStage === "incinerate") {
+			checkStage = "result";
+			checkStageStartMs = frameNowMs;
+			return;
+		}
+		if (checkStage === "result") {
+			checkIndex++;
+			checkStage = "incoming";
+			checkStageStartMs = frameNowMs;
+			checkIncomingFrames = 0;
+			checkOutgoingFrames = 0;
+			return;
+		}
+		if (checkStage === "final_score") {
+			checkStage = "final_prompt";
+			checkStageStartMs = frameNowMs;
+			return;
+		}
+		if (checkStage === "final_prompt") {
+			requestRestartWithTransition();
+			return;
+		}
+		return;
+	}
+	if (incinerate) {
+		incinerateTimer = frameNowMs - doneIncinerating - 1;
+		return;
+	}
+	if (isTimeUp) {
+		incinerate = true;
+		if (incinerateTimer === 0) {
+			incinerateTimer = frameNowMs;
+		}
+		return;
+	}
+	timeLeft = frameNowMs;
+	timesUp();
 }
 
 function entered(tool)
@@ -1153,6 +1523,7 @@ function importDrawings() {
 	body3_brain_severed = loadImage("assets/images/bodies/body3_brain_severed.png");
 	body1_xray = loadImage("assets/images/bodies/body1_xray.png");
 	body2_xray = loadImage("assets/images/bodies/body2_xray.png");
+	body3_xray = loadImage("assets/images/bodies/body3_xray.png");
 	
 	rightCab = loadImage("assets/images/ui/right_cabinet.png");
 	r1open = loadImage("assets/images/ui/top_right_open2.gif");
