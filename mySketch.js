@@ -1390,14 +1390,7 @@ function drawBody2(x, y) {
 	const hasFlap = !hasModelItemBeenInteracted("b2_flap");
   image(bed, x, y);
   image(body2, x, y);
-  if(hasKnee)
-    {
-      image(body2knee, x, y);
-    }
-	else
-		{
-			image(body2blood, x, y);
-		}
+
 	if(hasHand)
     {
       image(body2hand, x, y);
@@ -1416,6 +1409,15 @@ function drawBody2(x, y) {
 	if(hasSkin)
 		{
 			image(body2, x, y);
+		}
+	  if(hasKnee)
+    {
+		  const kneeJig = (typeof getBodyPartJiggleOffset === "function") ? getBodyPartJiggleOffset("b2_knee") : { x: 0, y: 0 };
+		  image(body2knee, x + kneeJig.x, y + kneeJig.y);
+    }
+	else
+		{
+			image(body2blood, x, y);
 		}
   if(hasFlap)
     {

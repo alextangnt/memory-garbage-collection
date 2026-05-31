@@ -38,6 +38,7 @@ let s = 15
 const TRACKING_OVERFLOW_SCALE_X = 1.5;
 const TRACKING_OVERFLOW_SCALE_Y = 1.45;
 const HAND_MAX = 2;
+const NEW_HAND_CONFIRM_FRAMES = 4;
 const PINCH_CLOSE_RATIO = 0.3;
 const PINCH_OPEN_RATIO = 0.62;
 const PINCH_HOLD_FRAMES = 2;
@@ -68,6 +69,9 @@ const PICKUP_ATTACH_DIST = 10;
 const PICKUP_RETURN_DIST = 12;
 const CLAW_PICKUP_SHRINK_SCALE = 0.82;
 const CLAW_SCALE_LERP = 0.3;
+const DIFFERENCE_FILTER_CONTRAST = 7;
+const DIFFERENCE_FILTER_BRIGHTNESS = 100;
+const DIFFERENCE_FILTER_SATURATION = 1.35;
 const HAND_DISTANCE_PALM_NEAR = 350;
 const HAND_DISTANCE_PALM_FAR = 300;
 const HAND_DISTANCE_CLAW_MIN_SCALE = 1.0;
@@ -119,8 +123,15 @@ const DEFAULT_UI_CONFIG = {
 };
 let toolConfig = JSON.parse(JSON.stringify(DEFAULT_TOOL_CONFIG));
 let uiConfig = JSON.parse(JSON.stringify(DEFAULT_UI_CONFIG));
+let diffPartSprites = {};
+let whitePartSprites = {};
+let whiteSpriteBySource = new Map();
+let diffSpriteBySource = new Map();
+const DIFFERENCE_WHITE_UNDERLAY_ALPHA = 70;
 const CLAW_FEEDBACK_JITTER_FRAMES = 8;
 const CLAW_FEEDBACK_JITTER_MAG = 15;
+const BODY_PART_JIGGLE_FRAMES = 5;
+const BODY_PART_JIGGLE_MAG = 6;
 const CLAW_FEEDBACK_LAUNCH_FRAMES = 11;
 const CLAW_FEEDBACK_LAUNCH_SCALE = 1.32;
 const PANEL_FAIL_JITTER_SPEED = 2.4;
@@ -148,6 +159,33 @@ let dragPanel = {
 	returnStartOffsetY: 0,
 	wasAtVerticalBound: false
 };
+let bodyPartJiggles = new Map();
+
+function triggerBodyPartJiggle(itemId, frames = BODY_PART_JIGGLE_FRAMES, mag = BODY_PART_JIGGLE_MAG) {
+	if (!itemId) return;
+	bodyPartJiggles.set(itemId, {
+		framesLeft: max(1, int(frames)),
+		totalFrames: max(1, int(frames)),
+		mag: mag
+	});
+}
+
+function getBodyPartJiggleOffset(itemId) {
+	if (!itemId || !bodyPartJiggles.has(itemId)) {
+		return createVector(0, 0);
+	}
+	const st = bodyPartJiggles.get(itemId);
+	const t = constrain(st.framesLeft / st.totalFrames, 0, 1);
+	const amp = st.mag * t;
+	const out = createVector((random() * 2 - 1) * amp, (random() * 2 - 1) * amp);
+	st.framesLeft -= 1;
+	if (st.framesLeft <= 0) {
+		bodyPartJiggles.delete(itemId);
+	} else {
+		bodyPartJiggles.set(itemId, st);
+	}
+	return out;
+}
 let drawerGrabState = {
 	left: null,
 	right: null
@@ -348,6 +386,7 @@ function createInteractionModel() {
 
 function resetInteractionModel() {
 	interactionModel = createInteractionModel();
+	bodyPartJiggles.clear();
 	binSortStats.correctCount = 0;
 	binSortStats.incorrectCount = 0;
 	binSortStats.binnedItemIds = new Set();
@@ -754,6 +793,28 @@ function isToolItem(itemID) {
 	return itemID === "tool_scalpel" || itemID === "tool_bonesaw" || itemID === "tool_hammer";
 }
 
+function getPickupCenterForGrabbable(g) {
+	if (!g) return createVector(0, 0);
+	// Tools in world (after first pickup) use an upward-shifted pickup center.
+	// This is detection-only; held alignment remains object center.
+	// Important: only apply while the loose tool image is actually visible.
+	// Hidden/in-drawer tools should keep their unshifted center hitbox.
+	if (isToolItem(g.itemID) && g.hasEverBeenPickedUp && g.visible && g.pic && typeof g.pic.height === "number") {
+		const offset = (g.pic.height * 0.25);
+		const tip = getHeldToolTipPoint(g, g.grabbedByHandSide);
+		if (tip) {
+			const dir = p5.Vector.sub(tip, g.pt);
+			if (dir.mag() > 0.0001) {
+				dir.setMag(offset);
+				return p5.Vector.add(g.pt, dir);
+			}
+		}
+		// Fallback if tip is unavailable.
+		return createVector(g.pt.x, g.pt.y - offset);
+	}
+	return g.pt.copy ? g.pt.copy() : createVector(g.pt.x, g.pt.y);
+}
+
 function getToolGrabbable(toolItemId) {
 	for (let i = 0; i < grabbables.length; i++) {
 		const g = grabbables[i];
@@ -851,6 +912,12 @@ function tryAnimateToolRequiredHitboxFeedback(handObj) {
 		}
 	}
 	if (!targetZone) return false;
+	const targetHb = (interactionModel && targetZone.modelHitboxId)
+		? interactionModel.hitboxesById.get(targetZone.modelHitboxId)
+		: null;
+	if (targetHb && targetHb.itemId === "b2_knee") {
+		triggerBodyPartJiggle("b2_knee");
+	}
 	// First mimic a successful grab approach animation (move to hitbox center + shrink),
 	// then reject with jitter feedback because the zone requires a tool.
 	handObj.startUiLockAnimation(targetZone.pt.copy(), () => {
@@ -1503,15 +1570,20 @@ class tracker{
 	constructor() {
 		this.hands = [];
 		this.seenThisFrame = [];
+		this.pendingBySide = { left: 0, right: 0 };
+		this.rawSeenSideThisFrame = { left: false, right: false };
 	}
 	getPinchPt(i){
 		return this.hands[i].pinchPt
 	}
 	beginFrame() {
 		this.seenThisFrame = new Array(this.hands.length).fill(false);
+		this.rawSeenSideThisFrame.left = false;
+		this.rawSeenSideThisFrame.right = false;
 	}
 	upsertHand(hand){
 		const side = inferHandSide(hand);
+		this.rawSeenSideThisFrame[side] = true;
 		const wrist = mapTrackedPoint(hand.keypoints[ML5HAND_WRIST].x, hand.keypoints[ML5HAND_WRIST].y);
 		let bestIdx = -1;
 		let bestDist = Infinity;
@@ -1534,6 +1606,14 @@ class tracker{
 		if (bestIdx >= 0) {
 			this.hands[bestIdx].updateFromDetection(hand);
 			this.seenThisFrame[bestIdx] = true;
+			this.pendingBySide[side] = 0;
+			return;
+		}
+
+		// Stronger anti-ghost gating: require sustained consecutive detections
+		// before spawning a new left/right track.
+		this.pendingBySide[side] = (this.pendingBySide[side] || 0) + 1;
+		if (this.pendingBySide[side] < NEW_HAND_CONFIRM_FRAMES) {
 			return;
 		}
 
@@ -1541,6 +1621,7 @@ class tracker{
 			const hTrack = new oneHand(hand, this.hands.length);
 			this.hands.push(hTrack);
 			this.seenThisFrame.push(true);
+			this.pendingBySide[side] = 0;
 			return;
 		}
 
@@ -1560,12 +1641,19 @@ class tracker{
 		}
 		this.hands[oldestIdx] = new oneHand(hand, oldestIdx);
 		this.seenThisFrame[oldestIdx] = true;
+		this.pendingBySide[side] = 0;
 	}
 	endFrame() {
 		for (let i = this.hands.length - 1; i >= 0; i--) {
 			if (!this.seenThisFrame[i]) {
 				this.hands[i].stepNoDetection();
 			}
+		}
+		if (!this.rawSeenSideThisFrame.left) {
+			this.pendingBySide.left = 0;
+		}
+		if (!this.rawSeenSideThisFrame.right) {
+			this.pendingBySide.right = 0;
 		}
 	}
 	ud() {
@@ -2078,7 +2166,8 @@ class oneHand {
 				if (g.minPinchGeneration > this.currentPinchGeneration) {
 					continue;
 				}
-				let d = vdist(this.pinchPt,g.pt)
+				const pickupCenter = getPickupCenterForGrabbable(g);
+				let d = vdist(this.pinchPt, pickupCenter)
 				if (d<(g.s * PINCH_TRIGGER_RANGE_SCALE / getWindowScaleFactor()) && d<=currClosestD){
 					currClosestD = d
 					currClosest = g
@@ -2472,6 +2561,20 @@ class grabbable {
 			return;
 		}
 		if (!this.isGrabbed) {
+			let rand = random(4);
+			if (rand>3)
+				{
+					rustle.play()
+				}
+			else if (rand>2) {
+				rustleL.play()
+			}
+			else if (rand>1){
+				pickup.play();
+			}
+			else {
+				pickupL.play();
+			}
 			if (isToolItem(this.itemID)) {
 				// Tools settle to handed hold orientation.
 				const handObj = getHandBySide(handSide || this.grabbedByHandSide);
@@ -2512,20 +2615,6 @@ class grabbable {
 		
 		if (!this.hasBeenGrabbed)
 			{
-				let rand = random(4);
-				if (rand>3)
-					{
-						rustle.play()
-					}
-				else if (rand>2) {
-					rustleL.play()
-				}
-				else if (rand>1){
-					pickup.play();
-				}
-				else {
-					pickupL.play();
-				}
 				// print("update")
 				this.hasBeenGrabbed = true;
 				if (handleBody1ItemFirstGrab(this)) {
@@ -2704,6 +2793,7 @@ function setupWeg() {
 	handpose.detectStart(video, gotHands);
 	applyUiInteractionConfig();
 	applyToolConfig();
+	initDifferenceSprites();
 	// for (let i=0; i<10; i++){
 	// 	grabbables.push(new grabbable(width/2, i*height/10,30+(5*i)))
 	// }
@@ -2713,6 +2803,117 @@ function setupWeg() {
 	setupBody1();
 	setupTools();
 	
+}
+
+function buildContrastDifferenceSprite(
+	srcImg,
+	contrast = DIFFERENCE_FILTER_CONTRAST,
+	brightnessOffset = DIFFERENCE_FILTER_BRIGHTNESS,
+	saturation = DIFFERENCE_FILTER_SATURATION
+) {
+	if (!srcImg || typeof srcImg.width !== "number" || typeof srcImg.height !== "number") {
+		return srcImg || null;
+	}
+	const pg = createGraphics(srcImg.width, srcImg.height);
+	pg.clear();
+	pg.imageMode(CORNER);
+	pg.image(srcImg, 0, 0);
+	pg.loadPixels();
+	const n = pg.pixels.length;
+	for (let i = 0; i < n; i += 4) {
+		const a = pg.pixels[i + 3];
+		if (a === 0) continue;
+		const r0 = pg.pixels[i];
+		const g0 = pg.pixels[i + 1];
+		const b0 = pg.pixels[i + 2];
+		const rC = ((r0 - 128) * contrast) + 128 + brightnessOffset;
+		const gC = ((g0 - 128) * contrast) + 128 + brightnessOffset;
+		const bC = ((b0 - 128) * contrast) + 128 + brightnessOffset;
+		const luma = (rC * 0.299) + (gC * 0.587) + (bC * 0.114);
+		const r = luma + (rC - luma) * saturation;
+		const g = luma + (gC - luma) * saturation;
+		const b = luma + (bC - luma) * saturation;
+		pg.pixels[i] = constrain(r, 0, 255);
+		pg.pixels[i + 1] = constrain(g, 0, 255);
+		pg.pixels[i + 2] = constrain(b, 0, 255);
+	}
+	pg.updatePixels();
+	return pg;
+}
+
+function buildWhiteSilhouetteSprite(srcImg) {
+	if (!srcImg || typeof srcImg.width !== "number" || typeof srcImg.height !== "number") {
+		return srcImg || null;
+	}
+	const pg = createGraphics(srcImg.width, srcImg.height);
+	pg.clear();
+	pg.imageMode(CORNER);
+	pg.image(srcImg, 0, 0);
+	pg.loadPixels();
+	const n = pg.pixels.length;
+	for (let i = 0; i < n; i += 4) {
+		const a = pg.pixels[i + 3];
+		if (a === 0) continue;
+		pg.pixels[i] = 255;
+		pg.pixels[i + 1] = 255;
+		pg.pixels[i + 2] = 255;
+	}
+	pg.updatePixels();
+	return pg;
+}
+
+function initDifferenceSprites() {
+	diffPartSprites = {};
+	whitePartSprites = {};
+	diffSpriteBySource = new Map();
+	whiteSpriteBySource = new Map();
+	const contrast = DIFFERENCE_FILTER_CONTRAST;
+	const brightnessOffset = DIFFERENCE_FILTER_BRIGHTNESS;
+	const saturation = DIFFERENCE_FILTER_SATURATION;
+	const register = (key, img) => {
+		if (!img) return;
+		const white = buildWhiteSilhouetteSprite(img);
+		const filtered = buildContrastDifferenceSprite(img, contrast, brightnessOffset, saturation);
+		whitePartSprites[key] = white;
+		diffPartSprites[key] = filtered;
+		whiteSpriteBySource.set(img, white);
+		diffSpriteBySource.set(img, filtered);
+	};
+	register("body1arm", (typeof body1arm !== "undefined") ? body1arm : null);
+	register("body1leg", (typeof body1leg !== "undefined") ? body1leg : null);
+	register("body1eyeball", (typeof body1eyeball !== "undefined") ? body1eyeball : null);
+	register("body1arm_severed", (typeof body1arm_severed !== "undefined") ? body1arm_severed : null);
+	register("body1leg_severed", (typeof body1leg_severed !== "undefined") ? body1leg_severed : null);
+	register("body1eyeball_severed", (typeof body1eyeball_severed !== "undefined") ? body1eyeball_severed : null);
+	register("body2knee", (typeof body2knee !== "undefined") ? body2knee : null);
+	register("body2hand", (typeof body2hand !== "undefined") ? body2hand : null);
+	register("body2ribs", (typeof body2ribs !== "undefined") ? body2ribs : null);
+	register("body2heart", (typeof body2heart !== "undefined") ? body2heart : null);
+	register("body2_knee_severed", (typeof body2_knee_severed !== "undefined") ? body2_knee_severed : null);
+	register("body2_hand_severed", (typeof body2_hand_severed !== "undefined") ? body2_hand_severed : null);
+	register("body2_heart_severed", (typeof body2_heart_severed !== "undefined") ? body2_heart_severed : null);
+	register("body3foot", (typeof body3foot !== "undefined") ? body3foot : null);
+	register("body3guts", (typeof body3guts !== "undefined") ? body3guts : null);
+	register("body3brain", (typeof body3brain !== "undefined") ? body3brain : null);
+	register("body3_foot_severed", (typeof body3_foot_severed !== "undefined") ? body3_foot_severed : null);
+	register("body3_guts_severed", (typeof body3_guts_severed !== "undefined") ? body3_guts_severed : null);
+	register("body3_brain_severed", (typeof body3_brain_severed !== "undefined") ? body3_brain_severed : null);
+}
+
+function getDifferenceSprite(key, fallbackImg) {
+	return diffPartSprites[key] || fallbackImg;
+}
+
+function getWhiteSprite(key, fallbackImg) {
+	return whitePartSprites[key] || fallbackImg;
+}
+
+function getDifferenceSpriteForImage(img) {
+	return (img && diffSpriteBySource.has(img)) ? diffSpriteBySource.get(img) : img;
+}
+
+function getWhiteSpriteForImage(img) {
+	return (img && whiteSpriteBySource.has(img)) ? whiteSpriteBySource.get(img) : img;
 }
 
 function drawWeg() {
@@ -2854,12 +3055,13 @@ function drawDebugInteractableHitboxes() {
 		if (!g || !isOnScreen(g.pt)) {
 			continue;
 		}
+		const pickupCenter = getPickupCenterForGrabbable(g);
 		const toolInside = toolHotSet.has(i);
 		const baseColor = g.hasBeenGrabbed ? color(0, 120, 255, 210) : color(255, 60, 60, 210);
 		stroke(toolInside ? color(0, 255, 120, 230) : baseColor);
-		circle(g.pt.x, g.pt.y, g.s * 2);
+		circle(pickupCenter.x, pickupCenter.y, g.s * 2);
 		stroke(toolInside ? color(255, 255, 0, 230) : color(255, 255, 255, 90));
-		circle(g.pt.x, g.pt.y, g.s * toolConfig.interactionRadiusFactor * 2);
+		circle(pickupCenter.x, pickupCenter.y, g.s * toolConfig.interactionRadiusFactor * 2);
 	}
 
 	// Drop-zone interactables.
@@ -2879,8 +3081,9 @@ function drawDebugInteractableHitboxes() {
 			if (!g || !isOnScreen(g.pt) || !g.active) {
 				continue;
 			}
+			const pickupCenter = getPickupCenterForGrabbable(g);
 			const edgeToEdgeReach = baseR + (g.s / getWindowScaleFactor());
-			if (vdist(p, g.pt) <= edgeToEdgeReach) {
+			if (vdist(p, pickupCenter) <= edgeToEdgeReach) {
 				anyInRange = true;
 				break;
 			}
@@ -2891,7 +3094,7 @@ function drawDebugInteractableHitboxes() {
 	pop();
 }
 
-function drawGrabbableVisualSnapshot(g) {
+function drawGrabbableVisualSnapshot(g, useWhiteLayer = false) {
 	if (!g || !g.visible || !g.pic) return;
 	push();
 	imageMode(CENTER);
@@ -2902,7 +3105,7 @@ function drawGrabbableVisualSnapshot(g) {
 	if (isToolItem(g.itemID) && g.grabbedByHandSide === "left") {
 		scale(-1, 1);
 	}
-	image(g.pic, 0, 0);
+	image(useWhiteLayer ? getWhiteSpriteForImage(g.pic) : getDifferenceSpriteForImage(g.pic), 0, 0);
 	pop();
 	pop();
 }
@@ -2941,31 +3144,45 @@ function drawPanelClipDifferenceOverlay() {
 		
 	}
 	
+	
+	// tint(255, DIFFERENCE_WHITE_UNDERLAY_ALPHA);
+	// drawBodyGrabbablePartsDifference(true);
+	// for (let i = 0; i < grabbables.length; i++) {
+	// 	drawGrabbableVisualSnapshot(grabbables[i], true);
+	// }
 	blendMode(DIFFERENCE);
-	tint(255, 255); 
-	drawBodyGrabbablePartsDifference();
+	tint(255, 255);
+	drawBodyGrabbablePartsDifference(false);
 	for (let i = 0; i < grabbables.length; i++) {
-		drawGrabbableVisualSnapshot(grabbables[i]);
+		drawGrabbableVisualSnapshot(grabbables[i], false);
 	}
 
-	blendMode(BLEND);
+	
+	blendMode(OVERLAY);
+	tint(255, 50);
+	drawBodyGrabbablePartsDifference(true);
+	for (let i = 0; i < grabbables.length; i++) {
+		drawGrabbableVisualSnapshot(grabbables[i], true);
+	}
 
 	drawingContext.restore();
 	pop();
 }
 
-function drawBodyGrabbablePartsDifference() {
+function drawBodyGrabbablePartsDifference(useWhiteLayer = false) {
 	if (typeof bedTrackBody === "undefined") return;
 	const x = bedTrackX;
 	const y = bedTrackY;
+	const pick = (key, fallbackImg) =>
+		useWhiteLayer ? getWhiteSprite(key, fallbackImg) : getDifferenceSprite(key, fallbackImg);
 	imageMode(CENTER);
 	if (bedTrackBody === 1) {
 		const hasArm = !hasModelItemBeenInteracted("b1_arm");
 		const hasLeg = !hasModelItemBeenInteracted("b1_leg");
 		const hasEyeball = !hasModelHitboxBeenGrabbed("b1_eye_ball");
-		if (hasArm && typeof body1arm !== "undefined" && body1arm) image(body1arm, x, y);
-		if (hasLeg && typeof body1leg !== "undefined" && body1leg) image(body1leg, x, y);
-		if (hasEyeball && typeof body1eyeball !== "undefined" && body1eyeball) image(body1eyeball, x, y);
+		if (hasArm && typeof body1arm !== "undefined" && body1arm) image(pick("body1arm", body1arm), x, y);
+		if (hasLeg && typeof body1leg !== "undefined" && body1leg) image(pick("body1leg", body1leg), x, y);
+		if (hasEyeball && typeof body1eyeball !== "undefined" && body1eyeball) image(pick("body1eyeball", body1eyeball), x, y);
 		return;
 	}
 	if (bedTrackBody === 2) {
@@ -2973,10 +3190,10 @@ function drawBodyGrabbablePartsDifference() {
 		const hasHand = !hasModelItemBeenInteracted("b2_hand");
 		const hasHeart = !hasModelItemBeenInteracted("b2_heart");
 		const hasRibs = !hasModelItemBeenInteracted("b2_rib");
-		if (hasKnee && typeof body2knee !== "undefined" && body2knee) image(body2knee, x, y);
-		if (hasHand && typeof body2hand !== "undefined" && body2hand) image(body2hand, x, y);
-		if (hasRibs && typeof body2ribs !== "undefined" && body2ribs) image(body2ribs, x, y);
-		if (hasHeart && typeof body2heart !== "undefined" && body2heart) image(body2heart, x, y);
+		if (hasKnee && typeof body2knee !== "undefined" && body2knee) image(pick("body2knee", body2knee), x, y);
+		if (hasHand && typeof body2hand !== "undefined" && body2hand) image(pick("body2hand", body2hand), x, y);
+		if (hasRibs && typeof body2ribs !== "undefined" && body2ribs) image(pick("body2ribs", body2ribs), x, y);
+		if (hasHeart && typeof body2heart !== "undefined" && body2heart) image(pick("body2heart", body2heart), x, y);
 		return;
 	}
 	if (bedTrackBody === 3) {
@@ -2985,9 +3202,9 @@ function drawBodyGrabbablePartsDifference() {
 		const hasGuts = !hasModelItemBeenInteracted("b3_guts");
 		const hasSkin = !hasModelItemBeenInteracted("b3_skin");
 		const hasBrain = !hasModelItemBeenInteracted("b3_brain");
-		if (hasFoot && typeof body3foot !== "undefined" && body3foot) image(body3foot, x, y);
-		if (hasGuts && typeof body3guts !== "undefined" && body3guts) image(body3guts, x, y);
-		if (hasBrain && typeof body3brain !== "undefined" && body3brain) image(body3brain, x, y);
+		if (hasFoot && typeof body3foot !== "undefined" && body3foot) image(pick("body3foot", body3foot), x, y);
+		if (hasGuts && typeof body3guts !== "undefined" && body3guts) image(pick("body3guts", body3guts), x, y);
+		if (hasBrain && typeof body3brain !== "undefined" && body3brain) image(pick("body3brain", body3brain), x, y);
 	}
 }
 
