@@ -63,7 +63,7 @@ function setup() {
 	restartBuffer = 50;
 	body2Setted = false;
 	body3Setted = false;
-	levelTime = 40000;
+	levelTime = 180000;
 	
 	w = BASE_W;
 	h = BASE_H;
