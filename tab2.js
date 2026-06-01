@@ -15,6 +15,8 @@ let w = 1620
 let h = 1080
 let mw = 640
 let mh = 480
+const CAM_W = 320;
+const CAM_H = 240
 let wratio = w/mw
 let hratio = h/mh
 let handTracker;
@@ -35,8 +37,8 @@ let globalPinchGeneration = 0;
 let options = { maxHands: 2, flipHorizontal: true };
 let grabRenderCounter = 0;
 let s = 15
-const TRACKING_OVERFLOW_SCALE_X = 1.5;
-const TRACKING_OVERFLOW_SCALE_Y = 1.45;
+const TRACKING_OVERFLOW_SCALE_X = 1.7;
+const TRACKING_OVERFLOW_SCALE_Y = 1.6;
 const HAND_MAX = 2;
 const NEW_HAND_CONFIRM_FRAMES = 4;
 const PINCH_CLOSE_RATIO = 0.3;
@@ -44,7 +46,12 @@ const PINCH_OPEN_RATIO = 0.62;
 const PINCH_HOLD_FRAMES = 2;
 const HAND_SMOOTH_ALPHA = 0.58;
 const MAX_TRACK_JUMP = 130;
-const MAX_MISSED_FRAMES = 10;
+const ENABLE_HAND_DEADZONE = true;
+const HAND_DEADZONE_PX = 4;
+const ENABLE_HAND_OUTLIER_GATE = true;
+const HAND_OUTLIER_DIST_PX = 46;
+const HAND_OUTLIER_HOLD_FRAMES = 2;
+const MAX_MISSED_FRAMES = 5;
 const HOME_RIGHT_OFFSET_X = 170;
 const HOME_LEFT_OFFSET_X = -170;
 const HOME_OFFSET_Y = 40;
@@ -72,8 +79,8 @@ const CLAW_SCALE_LERP = 0.3;
 const DIFFERENCE_FILTER_CONTRAST = 7;
 const DIFFERENCE_FILTER_BRIGHTNESS = 100;
 const DIFFERENCE_FILTER_SATURATION = 1.35;
-const HAND_DISTANCE_PALM_NEAR = 350;
-const HAND_DISTANCE_PALM_FAR = 300;
+const HAND_DISTANCE_PALM_NEAR = 250;
+const HAND_DISTANCE_PALM_FAR = 200;
 const HAND_DISTANCE_CLAW_MIN_SCALE = 1.0;
 const HAND_DISTANCE_CLAW_MAX_SCALE = 3;
 const HAND_DISTANCE_ITEM_MIN_SCALE = 1.0;
@@ -116,7 +123,7 @@ const DEFAULT_UI_CONFIG = {
 		]
 	},
 	bins: {
-		lockX: 300, lockZoneX1: 250, lockZoneX2: 400, openSpeedThreshold: 12, pullLeftThreshold: 12, pullZThresholdT: 0.72, consumeFrames: 30,
+		lockX: 300, lockZoneX1: 250, lockZoneX2: 400, openSpeedThreshold: 12, pullLeftThreshold: 12, pullZThresholdT: 0.72, consumeFrames: 30, openSettleFrames: 12,
 		top: { x1: 0, y1: 200, x2: 400, y2: 500, centerX: 200, centerY: 350 },
 		bottom: { x1: 0, y1: 600, x2: 400, y2: 900, centerX: 200, centerY: 750 }
 	}
@@ -130,6 +137,7 @@ let diffSpriteBySource = new Map();
 const DIFFERENCE_WHITE_UNDERLAY_ALPHA = 70;
 const CLAW_FEEDBACK_JITTER_FRAMES = 8;
 const CLAW_FEEDBACK_JITTER_MAG = 15;
+const CLAW_JITTER_SFX_COOLDOWN_MS = 1000;
 const BODY_PART_JIGGLE_FRAMES = 5;
 const BODY_PART_JIGGLE_MAG = 6;
 const CLAW_FEEDBACK_LAUNCH_FRAMES = 11;
@@ -153,6 +161,8 @@ let dragPanel = {
 	lastLeftY: 0,
 	lastRightY: 0,
 	velY: 0,
+	leftFailAttemptPrev: false,
+	rightFailAttemptPrev: false,
 	initialOffsetY: 0,
 	returnAnimating: false,
 	returnFrame: 0,
@@ -198,6 +208,10 @@ let binConsumeState = {
 	top: [],
 	bottom: []
 };
+let binOpenSettleFramesRemaining = {
+	top: 0,
+	bottom: 0
+};
 let binConsumeHadActive = {
 	top: false,
 	bottom: false
@@ -221,10 +235,90 @@ let binSortStats = {
 	orderedEvents: []
 };
 let interactionLockActive = false;
+let lastClawJitterSfxMs = -1e9;
+let perfTelemetry = {
+	lastSampleMs: 0,
+	lastDrawFrameCount: 0,
+	lastPredCount: 0,
+	drawFps: 0,
+	predFps: 0,
+	maxGrabbables: 0,
+	maxHands: 0,
+	jsHeapUsedMB: 0
+};
+let handPredictionCount = 0;
+
+function getToolPreviewLoopSoundKey(toolItemId, targetItemId) {
+	if (toolItemId === "tool_bonesaw") {
+		return "bonesaw";
+	}
+	if (toolItemId === "tool_scalpel") {
+		if (targetItemId === "b2_skin" || targetItemId === "b3_skin") {
+			return "scalpel";
+		}
+		return null;
+	}
+	if (toolItemId === "tool_hammer") {
+		if (targetItemId === "b2_rib") return "hammer_bone";
+		if (targetItemId === "b3_skull") return "hammer_metal";
+		return null;
+	}
+	return null;
+}
+
+function getToolPreviewLoopSoundByKey(key) {
+	if (key === "bonesaw") return (typeof bonesawLoopSfx !== "undefined") ? bonesawLoopSfx : null;
+	if (key === "scalpel") return (typeof scalpelLoopSfx !== "undefined") ? scalpelLoopSfx : null;
+	if (key === "hammer_bone") return (typeof hammerBoneLoopSfx !== "undefined") ? hammerBoneLoopSfx : null;
+	if (key === "hammer_metal") return (typeof hammerMetalLoopSfx !== "undefined") ? hammerMetalLoopSfx : null;
+	return null;
+}
 
 function triggerPanelJitter(mag = 4, frames = 8) {
 	panelJitterState.framesLeft = max(panelJitterState.framesLeft, frames);
 	panelJitterState.mag = max(panelJitterState.mag, mag);
+}
+
+function isLowQualityMode() {
+	return !!globalThis.LOW_QUALITY_MODE;
+}
+
+function updatePerfTelemetry() {
+	const nowMs = millis();
+	if (!perfTelemetry.lastSampleMs) {
+		perfTelemetry.lastSampleMs = nowMs;
+		perfTelemetry.lastDrawFrameCount = frameCount;
+		perfTelemetry.lastPredCount = handPredictionCount;
+		return;
+	}
+	const dtMs = nowMs - perfTelemetry.lastSampleMs;
+	if (dtMs < 1000) return;
+	const dtSec = dtMs / 1000;
+	const drawFrames = frameCount - perfTelemetry.lastDrawFrameCount;
+	const predFrames = handPredictionCount - perfTelemetry.lastPredCount;
+	perfTelemetry.drawFps = drawFrames / dtSec;
+	perfTelemetry.predFps = predFrames / dtSec;
+	perfTelemetry.lastSampleMs = nowMs;
+	perfTelemetry.lastDrawFrameCount = frameCount;
+	perfTelemetry.lastPredCount = handPredictionCount;
+	perfTelemetry.maxGrabbables = max(perfTelemetry.maxGrabbables, grabbables.length);
+	perfTelemetry.maxHands = max(perfTelemetry.maxHands, handTracker?.hands?.length || 0);
+	const perfMem = (typeof performance !== "undefined" && performance && performance.memory) ? performance.memory : null;
+	if (perfMem && typeof perfMem.usedJSHeapSize === "number") {
+		perfTelemetry.jsHeapUsedMB = perfMem.usedJSHeapSize / (1024 * 1024);
+	}
+	globalThis.perfTelemetry = perfTelemetry;
+	if (typeof DEBUG_MODE !== "undefined" && DEBUG_MODE) {
+		print("[PERF]", {
+			drawFps: Number(perfTelemetry.drawFps.toFixed(1)),
+			predFps: Number(perfTelemetry.predFps.toFixed(1)),
+			grabbables: grabbables.length,
+			maxGrabbables: perfTelemetry.maxGrabbables,
+			hands: handTracker?.hands?.length || 0,
+			maxHands: perfTelemetry.maxHands,
+			jsHeapUsedMB: Number(perfTelemetry.jsHeapUsedMB.toFixed(1))
+		});
+	}
 }
 
 function triggerBinLidJitter(binIdx, mag = 4, frames = 8) {
@@ -386,6 +480,8 @@ function createInteractionModel() {
 
 function resetInteractionModel() {
 	interactionModel = createInteractionModel();
+	binOpenSettleFramesRemaining.top = 0;
+	binOpenSettleFramesRemaining.bottom = 0;
 	bodyPartJiggles.clear();
 	binSortStats.correctCount = 0;
 	binSortStats.incorrectCount = 0;
@@ -981,6 +1077,12 @@ function triggerBinOpen(binIdx) {
 	if (!isBinOpen(binIdx)) {
 		if (drawerOpen && typeof drawerOpen.play === "function") drawerOpen.play();
 		setBinOpen(binIdx, true);
+		const settle = max(0, int(uiConfig?.bins?.openSettleFrames || 0));
+		if (binIdx === 0) {
+			binOpenSettleFramesRemaining.top = settle;
+		} else {
+			binOpenSettleFramesRemaining.bottom = settle;
+		}
 	}
 }
 
@@ -1269,6 +1371,11 @@ function updateBinIntake() {
 		if (!isBinOpen(entry.idx)) {
 			binConsumeState[entry.key] = [];
 			binConsumeHadActive[entry.key] = false;
+			binOpenSettleFramesRemaining[entry.key] = 0;
+			continue;
+		}
+		if (binOpenSettleFramesRemaining[entry.key] > 0) {
+			binOpenSettleFramesRemaining[entry.key]--;
 			continue;
 		}
 		if (!Array.isArray(binConsumeState[entry.key])) {
@@ -1418,6 +1525,8 @@ function updateDragPanelInteraction() {
 		dragPanel.engaged = false;
 		dragPanel.leftMagnet = false;
 		dragPanel.rightMagnet = false;
+		dragPanel.leftFailAttemptPrev = false;
+		dragPanel.rightFailAttemptPrev = false;
 		dragPanel.leftPrevPinch = left ? left.pinching : false;
 		dragPanel.rightPrevPinch = right ? right.pinching : false;
 		applyFreeDrift();
@@ -1448,6 +1557,8 @@ function updateDragPanelInteraction() {
 	dragPanel.engaged = dragPanel.leftMagnet || dragPanel.rightMagnet;
 
 	if (!dragPanel.engaged) {
+		dragPanel.leftFailAttemptPrev = false;
+		dragPanel.rightFailAttemptPrev = false;
 		applyFreeDrift();
 		if (!stepPanelReturnAnimation()) {
 			dragPanel.prevOffsetY = dragPanel.offsetY;
@@ -1496,26 +1607,30 @@ function updateDragPanelInteraction() {
 		// Feedback when one hand attempts to move but pair sync conditions are not met.
 		const lAttempt = dragPanel.leftMagnet && left.pinching && abs(dyL) >= scaleSpeedForWindow(PANEL_FAIL_JITTER_SPEED);
 		const rAttempt = dragPanel.rightMagnet && right.pinching && abs(dyR) >= scaleSpeedForWindow(PANEL_FAIL_JITTER_SPEED);
+		const lAttemptStart = lAttempt && !dragPanel.leftFailAttemptPrev;
+		const rAttemptStart = rAttempt && !dragPanel.rightFailAttemptPrev;
 		const bothLocked = dragPanel.leftMagnet && dragPanel.rightMagnet;
 		if (!bothLocked) {
-			if (lAttempt) {
+			if (lAttemptStart) {
 				left.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.7);
 				triggerPanelJitter();
 			}
-			if (rAttempt) {
+			if (rAttemptStart) {
 				right.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.7);
 				triggerPanelJitter();
 			}
 		} else if (!(combinedSpeed >= speedThreshold)) {
-			if (abs(dyL) > abs(dyR) + scaleSpeedForWindow(1.2) && lAttempt) {
+			if (abs(dyL) > abs(dyR) + scaleSpeedForWindow(1.2) && lAttemptStart) {
 				left.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.55);
 				triggerPanelJitter();
 			}
-			if (abs(dyR) > abs(dyL) + scaleSpeedForWindow(1.2) && rAttempt) {
+			if (abs(dyR) > abs(dyL) + scaleSpeedForWindow(1.2) && rAttemptStart) {
 				right.startClawJitter(CLAW_FEEDBACK_JITTER_FRAMES, CLAW_FEEDBACK_JITTER_MAG * 0.55);
 				triggerPanelJitter();
 			}
 		}
+		dragPanel.leftFailAttemptPrev = lAttempt;
+		dragPanel.rightFailAttemptPrev = rAttempt;
 	}
 
 	const minOffsetY = -uiConfig.panel.y1;
@@ -1741,6 +1856,8 @@ class oneHand {
 		this.toolPreviewT = 0;
 		this.toolRequiredFeedbackLockPt = null;
 		this.toolRequiredFeedbackPendingUnlock = false;
+		this.outlierHoldFrames = 0;
+		this.currentPreviewLoopSfxKey = null;
 		this.updateFromDetection(hand);
 	}
 	
@@ -1779,6 +1896,17 @@ class oneHand {
 	}
 	startClawJitter(frames = CLAW_FEEDBACK_JITTER_FRAMES, mag = CLAW_FEEDBACK_JITTER_MAG) {
 		if (this.feedbackMode === "launch") return;
+		if (this.feedbackMode === "jitter") return;
+		const nowMs = millis();
+		if (
+			
+			typeof metalWrong !== "undefined" &&
+			metalWrong &&
+			typeof metalWrong.play === "function"
+		) {
+			metalWrong.play();
+			lastClawJitterSfxMs = nowMs;
+		}
 		this.feedbackMode = "jitter";
 		this.feedbackFrame = 0;
 		this.feedbackTotalFrames = max(1, int(frames));
@@ -1895,6 +2023,7 @@ class oneHand {
 		return true;
 	}
 	releaseGrab(resetLatestGrabbed = false, allowThrow = false, forceUnpinch = true) {
+		this.syncToolPreviewLoopSfx(null);
 		if (this.grabbed != null) {
 			if (allowThrow && this.grabbed.pic != null) {
 				let avgTrackedSpeed = 0;
@@ -1967,12 +2096,35 @@ class oneHand {
 			targetThumb.add(shift);
 			targetIndex.add(shift);
 		}
+		// Optional outlier gate + deadzone on tracked pinch point.
+		const prevTrackedAccepted = this.prevTrackedPinchPt.copy();
+		const acceptedPinch = targetPinch.copy();
+		let trackedDelta = p5.Vector.sub(acceptedPinch, prevTrackedAccepted);
+		let trackedDeltaMag = trackedDelta.mag();
+		if (ENABLE_HAND_OUTLIER_GATE && trackedDeltaMag > scaleDistanceForWindow(HAND_OUTLIER_DIST_PX)) {
+			if (this.outlierHoldFrames < HAND_OUTLIER_HOLD_FRAMES) {
+				this.outlierHoldFrames++;
+				acceptedPinch.set(prevTrackedAccepted.x, prevTrackedAccepted.y);
+			} else {
+				// Clamp persistent outliers instead of accepting full jump.
+				trackedDelta.setMag(scaleDistanceForWindow(HAND_OUTLIER_DIST_PX));
+				acceptedPinch.set(prevTrackedAccepted.x + trackedDelta.x, prevTrackedAccepted.y + trackedDelta.y);
+			}
+		} else {
+			this.outlierHoldFrames = 0;
+		}
+		trackedDelta = p5.Vector.sub(acceptedPinch, prevTrackedAccepted);
+		trackedDeltaMag = trackedDelta.mag();
+		if (ENABLE_HAND_DEADZONE && trackedDeltaMag < scaleDistanceForWindow(HAND_DEADZONE_PX)) {
+			acceptedPinch.set(prevTrackedAccepted.x, prevTrackedAccepted.y);
+			trackedDelta.set(0, 0);
+		}
 
 		this.thumbTip = p5.Vector.lerp(this.thumbTip, targetThumb, HAND_SMOOTH_ALPHA);
 		this.indexTip = p5.Vector.lerp(this.indexTip, targetIndex, HAND_SMOOTH_ALPHA);
-		const trackedVel = p5.Vector.sub(targetPinch, this.prevTrackedPinchPt);
-		this.prevTrackedPinchPt = targetPinch.copy();
-		this.trackedPinchPt = p5.Vector.lerp(this.trackedPinchPt, targetPinch, HAND_SMOOTH_ALPHA);
+		const trackedVel = p5.Vector.sub(acceptedPinch, this.prevTrackedPinchPt);
+		this.prevTrackedPinchPt = acceptedPinch.copy();
+		this.trackedPinchPt = p5.Vector.lerp(this.trackedPinchPt, acceptedPinch, HAND_SMOOTH_ALPHA);
 		const clawMotionOwnedByAnimation =
 			this.isPickupAnimating ||
 			this.isUiLockAnimating ||
@@ -2004,6 +2156,7 @@ class oneHand {
 		}
 	}
 	stepNoDetection() {
+		this.syncToolPreviewLoopSfx(null);
 		this.missedFrames++;
 		this.releaseGrab(true);
 		this.velocity.mult(0.7);
@@ -2229,6 +2382,7 @@ class oneHand {
 	updateToolGestureInteractions() {
 		const heldTool = this.grabbed;
 		if (!heldTool || !isToolItem(heldTool.itemID) || !this.pinching) {
+			this.syncToolPreviewLoopSfx(null);
 			this.lastHeldToolItemId = null;
 			this.prevToolTip = null;
 			this.toolTipSpeed = 0;
@@ -2256,6 +2410,8 @@ class oneHand {
 		const scalpelMax = scaleSpeedForWindow(toolConfig.cutScalpelMaxSpeed);
 		const bonesawMin = scaleSpeedForWindow(toolConfig.cutBonesawMinSpeed);
 		const hammerMin = scaleSpeedForWindow(toolConfig.cutHammerMinSpeed);
+		let previewSfxCandidate = null;
+		let previewSfxCandidateDist = Infinity;
 		const isSpeedMatch = (speedVal) => {
 			if (toolItemId === "tool_scalpel") {
 				return speedVal >= scalpelMin && speedVal <= scalpelMax;
@@ -2351,6 +2507,14 @@ class oneHand {
 			if (hb.interactionMode !== "cut_gesture") {
 				continue;
 			}
+			const sfxKey = getToolPreviewLoopSoundKey(toolItemId, zoneG.modelItemId);
+			if (sfxKey) {
+				const d = vdist(tip, zoneG.pt);
+				if (d < previewSfxCandidateDist) {
+					previewSfxCandidateDist = d;
+					previewSfxCandidate = sfxKey;
+				}
+			}
 			state.chunkSum += this.toolTipSpeed;
 			state.chunkCount++;
 			if (state.chunkCount >= chunkFrames) {
@@ -2403,6 +2567,26 @@ class oneHand {
 		const previewStartChunks = max(1, int(toolConfig.toolPreviewStartChunks || 1));
 		if (this.toolPreviewGoodChunks >= previewStartChunks) {
 			this.toolPreviewActive = true;
+		}
+		this.syncToolPreviewLoopSfx(this.toolPreviewActive ? previewSfxCandidate : null);
+	}
+	syncToolPreviewLoopSfx(nextKey) {
+		const prevKey = this.currentPreviewLoopSfxKey;
+		if (prevKey && prevKey !== nextKey) {
+			const prevSfx = getToolPreviewLoopSoundByKey(prevKey);
+			if (prevSfx && typeof prevSfx.isPlaying === "function" && prevSfx.isPlaying()) {
+				prevSfx.stop();
+			}
+		}
+		this.currentPreviewLoopSfxKey = nextKey || null;
+		if (!nextKey) return;
+		const sfx = getToolPreviewLoopSoundByKey(nextKey);
+		if (!sfx) return;
+		if (typeof sfx.isPlaying === "function" && sfx.isPlaying()) return;
+		if (typeof sfx.loop === "function") {
+			sfx.loop();
+		} else if (typeof sfx.play === "function") {
+			sfx.play();
 		}
 	}
 	checkzig() {
@@ -2787,7 +2971,7 @@ function setupWeg() {
 	resizeCanvas(w, h);
   // Create the webcam video and hide it
   video = createCapture(VIDEO);
-  video.size(width, height);
+  video.size(CAM_H, CAM_W);
   video.hide();
   // start detecting hands from the webcam video
 	handpose.detectStart(video, gotHands);
@@ -2931,6 +3115,7 @@ function drawWeg() {
 	pop();
 
 	updateUiJitterOffsets();
+	updatePerfTelemetry();
 	handTracker.ud();
 	updateDragPanelInteraction();
 	updateDrawerGrabInteractions();
@@ -3022,6 +3207,27 @@ function getPanelClipRect(applyPanelOffset = true) {
 	return { x1, x2, y1: y1Base + panelOffset, y2: y2Base + panelOffset };
 }
 
+function shouldDrawPanelDifferenceLayer() {
+	if (!dragPanel || typeof dragPanel.offsetY !== "number" || typeof dragPanel.initialOffsetY !== "number") {
+		return true;
+	}
+	// When panel is parked at reset, skip expensive clipped redraw passes entirely.
+	return abs(dragPanel.offsetY - dragPanel.initialOffsetY) > 0.5;
+}
+
+function rectIntersectsRect(a, b) {
+	return !(a.x2 < b.x1 || a.x1 > b.x2 || a.y2 < b.y1 || a.y1 > b.y2);
+}
+
+function spriteMayIntersectRect(cx, cy, img, scaleVal, clipRect) {
+	if (!img || !clipRect) return true;
+	const sw = (img.width || 0) * abs(scaleVal || 1);
+	const sh = (img.height || 0) * abs(scaleVal || 1);
+	const halfDiag = 0.5 * sqrt((sw * sw) + (sh * sh));
+	const aabb = { x1: cx - halfDiag, y1: cy - halfDiag, x2: cx + halfDiag, y2: cy + halfDiag };
+	return rectIntersectsRect(aabb, clipRect);
+}
+
 function drawDebugInteractableHitboxes() {
 	if (typeof DEBUG_MODE === "undefined" || !DEBUG_MODE) {
 		return;
@@ -3094,8 +3300,9 @@ function drawDebugInteractableHitboxes() {
 	pop();
 }
 
-function drawGrabbableVisualSnapshot(g, useWhiteLayer = false) {
+function drawGrabbableVisualSnapshot(g, useWhiteLayer = false, clipRect = null) {
 	if (!g || !g.visible || !g.pic) return;
+	if (clipRect && !spriteMayIntersectRect(g.pt.x, g.pt.y, g.pic, g.currentScale, clipRect)) return;
 	push();
 	imageMode(CENTER);
 	translate(g.pt.x, g.pt.y);
@@ -3111,6 +3318,7 @@ function drawGrabbableVisualSnapshot(g, useWhiteLayer = false) {
 }
 
 function drawPanelClipDifferenceOverlay() {
+	if (!shouldDrawPanelDifferenceLayer()) return;
 	const clipRect = getPanelClipRect(true);
 	if (!clipRect) return;
 	const { x1, y1, x2, y2 } = clipRect;
@@ -3152,27 +3360,30 @@ function drawPanelClipDifferenceOverlay() {
 	// }
 	blendMode(DIFFERENCE);
 	tint(255, 255);
-	drawBodyGrabbablePartsDifference(false);
+	drawBodyGrabbablePartsDifference(false, clipRect);
 	for (let i = 0; i < grabbables.length; i++) {
-		drawGrabbableVisualSnapshot(grabbables[i], false);
+		drawGrabbableVisualSnapshot(grabbables[i], false, clipRect);
 	}
 
 	
 	blendMode(OVERLAY);
-	tint(255, 50);
-	drawBodyGrabbablePartsDifference(true);
-	for (let i = 0; i < grabbables.length; i++) {
-		drawGrabbableVisualSnapshot(grabbables[i], true);
+	if (!isLowQualityMode()) {
+		tint(255, 50);
+		drawBodyGrabbablePartsDifference(true, clipRect);
+		for (let i = 0; i < grabbables.length; i++) {
+			drawGrabbableVisualSnapshot(grabbables[i], true, clipRect);
+		}
 	}
 
 	drawingContext.restore();
 	pop();
 }
 
-function drawBodyGrabbablePartsDifference(useWhiteLayer = false) {
+function drawBodyGrabbablePartsDifference(useWhiteLayer = false, clipRect = null) {
 	if (typeof bedTrackBody === "undefined") return;
 	const x = bedTrackX;
 	const y = bedTrackY;
+	const canDraw = (img) => spriteMayIntersectRect(x, y, img, 1, clipRect);
 	const pick = (key, fallbackImg) =>
 		useWhiteLayer ? getWhiteSprite(key, fallbackImg) : getDifferenceSprite(key, fallbackImg);
 	imageMode(CENTER);
@@ -3180,9 +3391,9 @@ function drawBodyGrabbablePartsDifference(useWhiteLayer = false) {
 		const hasArm = !hasModelItemBeenInteracted("b1_arm");
 		const hasLeg = !hasModelItemBeenInteracted("b1_leg");
 		const hasEyeball = !hasModelHitboxBeenGrabbed("b1_eye_ball");
-		if (hasArm && typeof body1arm !== "undefined" && body1arm) image(pick("body1arm", body1arm), x, y);
-		if (hasLeg && typeof body1leg !== "undefined" && body1leg) image(pick("body1leg", body1leg), x, y);
-		if (hasEyeball && typeof body1eyeball !== "undefined" && body1eyeball) image(pick("body1eyeball", body1eyeball), x, y);
+		if (hasArm && typeof body1arm !== "undefined" && body1arm && canDraw(body1arm)) image(pick("body1arm", body1arm), x, y);
+		if (hasLeg && typeof body1leg !== "undefined" && body1leg && canDraw(body1leg)) image(pick("body1leg", body1leg), x, y);
+		if (hasEyeball && typeof body1eyeball !== "undefined" && body1eyeball && canDraw(body1eyeball)) image(pick("body1eyeball", body1eyeball), x, y);
 		return;
 	}
 	if (bedTrackBody === 2) {
@@ -3190,10 +3401,10 @@ function drawBodyGrabbablePartsDifference(useWhiteLayer = false) {
 		const hasHand = !hasModelItemBeenInteracted("b2_hand");
 		const hasHeart = !hasModelItemBeenInteracted("b2_heart");
 		const hasRibs = !hasModelItemBeenInteracted("b2_rib");
-		if (hasKnee && typeof body2knee !== "undefined" && body2knee) image(pick("body2knee", body2knee), x, y);
-		if (hasHand && typeof body2hand !== "undefined" && body2hand) image(pick("body2hand", body2hand), x, y);
-		if (hasRibs && typeof body2ribs !== "undefined" && body2ribs) image(pick("body2ribs", body2ribs), x, y);
-		if (hasHeart && typeof body2heart !== "undefined" && body2heart) image(pick("body2heart", body2heart), x, y);
+		if (hasKnee && typeof body2knee !== "undefined" && body2knee && canDraw(body2knee)) image(pick("body2knee", body2knee), x, y);
+		if (hasHand && typeof body2hand !== "undefined" && body2hand && canDraw(body2hand)) image(pick("body2hand", body2hand), x, y);
+		if (hasRibs && typeof body2ribs !== "undefined" && body2ribs && canDraw(body2ribs)) image(pick("body2ribs", body2ribs), x, y);
+		if (hasHeart && typeof body2heart !== "undefined" && body2heart && canDraw(body2heart)) image(pick("body2heart", body2heart), x, y);
 		return;
 	}
 	if (bedTrackBody === 3) {
@@ -3202,9 +3413,9 @@ function drawBodyGrabbablePartsDifference(useWhiteLayer = false) {
 		const hasGuts = !hasModelItemBeenInteracted("b3_guts");
 		const hasSkin = !hasModelItemBeenInteracted("b3_skin");
 		const hasBrain = !hasModelItemBeenInteracted("b3_brain");
-		if (hasFoot && typeof body3foot !== "undefined" && body3foot) image(pick("body3foot", body3foot), x, y);
-		if (hasGuts && typeof body3guts !== "undefined" && body3guts) image(pick("body3guts", body3guts), x, y);
-		if (hasBrain && typeof body3brain !== "undefined" && body3brain) image(pick("body3brain", body3brain), x, y);
+		if (hasFoot && typeof body3foot !== "undefined" && body3foot && canDraw(body3foot)) image(pick("body3foot", body3foot), x, y);
+		if (hasGuts && typeof body3guts !== "undefined" && body3guts && canDraw(body3guts)) image(pick("body3guts", body3guts), x, y);
+		if (hasBrain && typeof body3brain !== "undefined" && body3brain && canDraw(body3brain)) image(pick("body3brain", body3brain), x, y);
 	}
 }
 
@@ -3381,6 +3592,7 @@ function drawPanelDebugOverlay() {
 // Callback function for when handpose outputs data
 function gotHands(results) {
   // save the output to the hands variable
+  handPredictionCount++;
   hands = results;
 
 	handTracker.beginFrame();
@@ -3469,6 +3681,8 @@ function resetWegGameState() {
 	binConsumeState.bottom = [];
 	binConsumeHadActive.top = false;
 	binConsumeHadActive.bottom = false;
+	binOpenSettleFramesRemaining.top = 0;
+	binOpenSettleFramesRemaining.bottom = 0;
 	panelJitterOffsetX = 0;
 	panelJitterOffsetY = 0;
 	lidTopJitterOffsetX = 0;

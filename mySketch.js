@@ -7,6 +7,7 @@ let bedTrackY = 0;
 let bedTrackBody = 1;
 let frameNowMs = 0;
 const DEBUG_MODE = false; // Toggle debug controls here.
+const LOW_QUALITY_MODE = false; // Toggle low-quality rendering/perf mode here.
 let debugTimerPaused = false;
 let debugPausedRemainingMs = 0;
 const BODY_ENTER_SPEED = 9;
@@ -63,7 +64,7 @@ function setup() {
 	restartBuffer = 50;
 	body2Setted = false;
 	body3Setted = false;
-	levelTime = 180000;
+	levelTime = 120000;
 	
 	w = BASE_W;
 	h = BASE_H;
@@ -73,6 +74,7 @@ function setup() {
 	
 	mainCanvas = createCanvas(w, h);
 	mainCanvas.elt.getContext('2d', { willReadFrequently: true });
+	frameRate(LOW_QUALITY_MODE ? 30 : 60);
 	background(80);
 	imageMode(CENTER);
 	angleMode(DEGREES);
@@ -1578,4 +1580,10 @@ function importSounds() {
 	pickup = loadSound('assets/audio/clipboardPickup.mp3')
 	pickupL = loadSound('assets/audio/randomPickup.mp3')
 	blaze = loadSound('assets/audio/9jdd4s_1.mp3')
+	bonesawLoopSfx = loadSound('assets/audio/Bonesaw.mp3')
+	hammerBoneLoopSfx = loadSound('assets/audio/Hammer Hit Bone.mp3')
+	hammerMetalLoopSfx = loadSound('assets/audio/Hammer Hit Metal.mp3')
+	scalpelLoopSfx = loadSound('assets/audio/Scalpel.mp3')
+
+	metalWrong = loadSound('assets/audio/Metal Wrong Rattle.mp3')
 }
