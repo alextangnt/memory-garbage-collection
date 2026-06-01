@@ -29,6 +29,7 @@ let handpose;
 let video;
 let hands = [];
 let hand = [];
+let pendingHandsResults = null;
 let bodyGrabbablesData = null;
 let uiInteractionsData = null;
 let toolConfigData = null;
@@ -79,8 +80,8 @@ const CLAW_SCALE_LERP = 0.3;
 const DIFFERENCE_FILTER_CONTRAST = 7;
 const DIFFERENCE_FILTER_BRIGHTNESS = 100;
 const DIFFERENCE_FILTER_SATURATION = 1.35;
-const HAND_DISTANCE_PALM_NEAR = 250;
-const HAND_DISTANCE_PALM_FAR = 200;
+const HAND_DISTANCE_PALM_NEAR = 300;
+const HAND_DISTANCE_PALM_FAR = 275;
 const HAND_DISTANCE_CLAW_MIN_SCALE = 1.0;
 const HAND_DISTANCE_CLAW_MAX_SCALE = 3;
 const HAND_DISTANCE_ITEM_MIN_SCALE = 1.0;
@@ -3114,6 +3115,7 @@ function drawWeg() {
   //image(video, 0, 0, width, height);
 	pop();
 
+	consumePendingHandResults();
 	updateUiJitterOffsets();
 	updatePerfTelemetry();
 	handTracker.ud();
@@ -3149,6 +3151,17 @@ function drawWeg() {
 			line(zig[i].x+zstart.x,zig[i].y+zstart.y,zig[i+1].x+zstart.x,zig[i+1].y+zstart.y);
 		}
 	}
+}
+
+function consumePendingHandResults() {
+	if (!pendingHandsResults) return;
+	hands = pendingHandsResults;
+	pendingHandsResults = null;
+	handTracker.beginFrame();
+	for (let i = 0; i < hands.length; i++) {
+		handTracker.upsertHand(hands[i]);
+	}
+	handTracker.endFrame();
 }
 
 function drawPanelMaskedPromptText() {
@@ -3591,15 +3604,9 @@ function drawPanelDebugOverlay() {
 
 // Callback function for when handpose outputs data
 function gotHands(results) {
-  // save the output to the hands variable
-  handPredictionCount++;
-  hands = results;
-
-	handTracker.beginFrame();
-	for (let i = 0; i < hands.length; i++) {
-		handTracker.upsertHand(hands[i]);
-	}
-	handTracker.endFrame();
+	// Keep callback lightweight: only store latest prediction payload.
+	handPredictionCount++;
+	pendingHandsResults = results;
 }
 
 function getPicByKeyMap() {

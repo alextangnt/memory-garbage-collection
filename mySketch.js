@@ -7,7 +7,8 @@ let bedTrackY = 0;
 let bedTrackBody = 1;
 let frameNowMs = 0;
 const DEBUG_MODE = false; // Toggle debug controls here.
-const LOW_QUALITY_MODE = false; // Toggle low-quality rendering/perf mode here.
+const LOW_QUALITY_MODE_DEFAULT = false; // Initial quality mode at boot.
+let lowQualityMode = LOW_QUALITY_MODE_DEFAULT;
 let debugTimerPaused = false;
 let debugPausedRemainingMs = 0;
 const BODY_ENTER_SPEED = 9;
@@ -53,6 +54,12 @@ let startScreenStartMs = 0;
 let timerIntroActive = true;
 let timerIntroStartMs = 0;
 
+function setQualityMode(isLow) {
+	lowQualityMode = !!isLow;
+	globalThis.LOW_QUALITY_MODE = lowQualityMode;
+	frameRate(lowQualityMode ? 30 : 60);
+}
+
 function preload() {
 	importDrawings();
 	importSounds();
@@ -74,7 +81,7 @@ function setup() {
 	
 	mainCanvas = createCanvas(w, h);
 	mainCanvas.elt.getContext('2d', { willReadFrequently: true });
-	frameRate(LOW_QUALITY_MODE ? 30 : 60);
+	setQualityMode(lowQualityMode);
 	background(80);
 	imageMode(CENTER);
 	angleMode(DEGREES);
@@ -1029,6 +1036,14 @@ function keyTyped() {
 }
 
 function keyPressed() {
+	if (key === "1") {
+		setQualityMode(false);
+		return false;
+	}
+	if (key === "2") {
+		setQualityMode(true);
+		return false;
+	}
 	if (startScreenActive) {
 		requestRestartWithTransition();
 		return false;
@@ -1392,27 +1407,7 @@ function drawBody2(x, y) {
 	const hasFlap = !hasModelItemBeenInteracted("b2_flap");
   image(bed, x, y);
   image(body2, x, y);
-
-	if(hasHand)
-    {
-      image(body2hand, x, y);
-    }
-	if(hasHeart)
-		{
-			image(body2heart, x, y);
-		}
-		else {
-			image(body2empty, x, y);
-		}
-  if(hasRibs)
-    {
-      image(body2ribs, x, y);
-    }
-	if(hasSkin)
-		{
-			image(body2, x, y);
-		}
-	  if(hasKnee)
+  	  if(hasKnee)
     {
 		  const kneeJig = (typeof getBodyPartJiggleOffset === "function") ? getBodyPartJiggleOffset("b2_knee") : { x: 0, y: 0 };
 		  image(body2knee, x + kneeJig.x, y + kneeJig.y);
@@ -1421,6 +1416,26 @@ function drawBody2(x, y) {
 		{
 			image(body2blood, x, y);
 		}
+
+	if(hasHand)
+    {
+      image(body2hand, x, y);
+    }
+	if (!hasSkin){
+	if(hasHeart)
+		{
+			image(body2heart, x, y);
+		}
+		else {
+			image(body2empty, x, y);
+		}
+	if(hasRibs)
+		{
+		image(body2ribs, x, y);
+		}
+	}
+
+
   if(hasFlap)
     {
       image(body2flap, x, y);
