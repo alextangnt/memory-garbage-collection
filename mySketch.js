@@ -1585,7 +1585,7 @@ function importDrawings() {
 }
 
 function importSounds() {
-	bgm = createAudio('assets/audio/Ambience.mp3');
+	bgm = createAudio('assets/audio/industrial.mp3');
 	bgm.volume(0.4);
 	drawerOpen = loadSound('assets/audio/drawerOpen.mp3');
 	drawerClose = loadSound('assets/audio/drawerClose.mp3');
