@@ -120,7 +120,7 @@ function setup() {
 	timerDisplacementY = -300;
 	
 	//begin
-	bgm.play();
+	// bgm.play();
 	
 	bodyCount = 1;
 	
@@ -163,7 +163,9 @@ function setup() {
 }
 
 function applyResponsiveCanvasScale() {
-	const scaleFactor = min(windowWidth / BASE_W, windowHeight / BASE_H);
+	const previewPanel = document.getElementById("camera-preview-panel");
+	const availableW = previewPanel ? max(1, windowWidth * 0.5) : windowWidth;
+	const scaleFactor = min(availableW / BASE_W, windowHeight / BASE_H);
 	const displayW = floor(BASE_W * scaleFactor);
 	const displayH = floor(BASE_H * scaleFactor);
 
@@ -171,7 +173,7 @@ function applyResponsiveCanvasScale() {
 		mainCanvas.style("width", displayW + "px");
 		mainCanvas.style("height", displayH + "px");
 		mainCanvas.style("position", "absolute");
-		mainCanvas.style("left", ((windowWidth - displayW) / 2) + "px");
+		mainCanvas.style("left", ((availableW - displayW) / 2) + "px");
 		mainCanvas.style("top", ((windowHeight - displayH) / 2) + "px");
 		mainCanvas.elt.getContext('2d', { willReadFrequently: true });
 	}
@@ -663,7 +665,7 @@ function drawStartScreen() {
 		lineGap: 86,
 		lines: [
 			{ text: "MEMORY GARBAGE COLLECTION", size: textDisplaySize * 0.20, dy: -20 },
-			{ text: "PRESS ANY KEY TO START", size: textDisplaySize * 0.11, dy: 48 }
+			{ text: "PRESS ANY KEY TO START", size: textDisplaySize * 0.11, dy: 24 }
 		]
 	};
 	drawWeg();

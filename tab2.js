@@ -373,13 +373,13 @@ function mapTrackedPoint(rawX, rawY){
 	);
 }
 function getWindowScaleFactor() {
-	return max(0.1, min(windowWidth / w, windowHeight / h));
+	return 1;
 }
 function scaleDistanceForWindow(baseDistance) {
-	return baseDistance / getWindowScaleFactor();
+	return baseDistance;
 }
 function scaleSpeedForWindow(baseSpeed) {
-	return baseSpeed / getWindowScaleFactor();
+	return baseSpeed;
 }
 function mapPalmScaleToDistanceT(palmScale) {
 	const near = max(HAND_DISTANCE_PALM_NEAR, HAND_DISTANCE_PALM_FAR + 1);
@@ -1003,7 +1003,7 @@ function tryAnimateToolRequiredHitboxFeedback(handObj) {
 		const hb = (interactionModel && g.modelHitboxId) ? interactionModel.hitboxesById.get(g.modelHitboxId) : null;
 		if (!hb || !hb.requiredTool) continue;
 		const d = vdist(handObj.pinchPt, g.pt);
-		if (d <= (g.s * PINCH_TRIGGER_RANGE_SCALE / getWindowScaleFactor()) && d < nearestDist) {
+		if (d <= (g.s * PINCH_TRIGGER_RANGE_SCALE) && d < nearestDist) {
 			nearestDist = d;
 			targetZone = g;
 		}
@@ -2322,7 +2322,7 @@ class oneHand {
 				}
 				const pickupCenter = getPickupCenterForGrabbable(g);
 				let d = vdist(this.pinchPt, pickupCenter)
-				if (d<(g.s * PINCH_TRIGGER_RANGE_SCALE / getWindowScaleFactor()) && d<=currClosestD){
+				if (d < (g.s * PINCH_TRIGGER_RANGE_SCALE) && d <= currClosestD){
 					currClosestD = d
 					currClosest = g
 				}
@@ -2974,6 +2974,7 @@ function setupWeg() {
   video = createCapture(VIDEO);
   video.size(CAM_H, CAM_W);
   video.hide();
+	attachCameraPreview();
   // start detecting hands from the webcam video
 	handpose.detectStart(video, gotHands);
 	applyUiInteractionConfig();
@@ -2988,6 +2989,18 @@ function setupWeg() {
 	setupBody1();
 	setupTools();
 	
+}
+
+function attachCameraPreview() {
+	const preview = document.getElementById("camera-preview");
+	if (!preview || !video || !video.elt) return;
+	const stream = video.elt.srcObject;
+	if (stream) {
+		preview.srcObject = stream;
+		preview.play?.().catch(() => {});
+		return;
+	}
+	setTimeout(attachCameraPreview, 120);
 }
 
 function buildContrastDifferenceSprite(
@@ -3293,7 +3306,7 @@ function drawDebugInteractableHitboxes() {
 	for (let hIdx = 0; hIdx < handTracker.hands.length; hIdx++) {
 		const handObj = handTracker.hands[hIdx];
 		const p = handObj.pinchPt;
-		const baseR = (handObj.grabReach / getWindowScaleFactor());
+		const baseR = handObj.grabReach;
 		let anyInRange = false;
 		for (let i = 0; i < grabbables.length; i++) {
 			const g = grabbables[i];
@@ -3301,7 +3314,7 @@ function drawDebugInteractableHitboxes() {
 				continue;
 			}
 			const pickupCenter = getPickupCenterForGrabbable(g);
-			const edgeToEdgeReach = baseR + (g.s / getWindowScaleFactor());
+			const edgeToEdgeReach = baseR + g.s;
 			if (vdist(p, pickupCenter) <= edgeToEdgeReach) {
 				anyInRange = true;
 				break;
